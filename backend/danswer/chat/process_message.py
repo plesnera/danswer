@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from danswer.chat.chat_utils import build_chat_system_message
 from danswer.chat.chat_utils import build_chat_user_message
-from danswer.chat.chat_utils import build_doc_context_str
 from danswer.chat.chat_utils import compute_max_document_tokens
 from danswer.chat.chat_utils import compute_max_llm_input_tokens
 from danswer.chat.chat_utils import create_chat_chain
@@ -26,7 +25,7 @@ from danswer.configs.chat_configs import CHAT_TARGET_CHUNK_PERCENTAGE
 from danswer.configs.chat_configs import MAX_CHUNKS_FED_TO_CHAT
 from danswer.configs.constants import DISABLED_GEN_AI_MSG
 from danswer.configs.constants import MessageType
-from danswer.configs.model_configs import CHUNK_SIZE
+from danswer.configs.model_configs import DOC_EMBEDDING_CONTEXT_SIZE
 from danswer.db.chat import create_db_search_doc
 from danswer.db.chat import create_new_chat_message
 from danswer.db.chat import get_chat_message
@@ -51,6 +50,7 @@ from danswer.llm.utils import get_default_llm_version
 from danswer.llm.utils import get_max_input_tokens
 from danswer.llm.utils import tokenizer_trim_content
 from danswer.llm.utils import translate_history_to_basemessages
+from danswer.prompts.prompt_utils import build_doc_context_str
 from danswer.search.models import OptionalSearchSetting
 from danswer.search.models import RetrievalDetails
 from danswer.search.request_preprocessing import retrieval_preprocessing
@@ -160,7 +160,7 @@ def stream_chat_message_objects(
     db_session: Session,
     # Needed to translate persona num_chunks to tokens to the LLM
     default_num_chunks: float = MAX_CHUNKS_FED_TO_CHAT,
-    default_chunk_size: int = CHUNK_SIZE,
+    default_chunk_size: int = DOC_EMBEDDING_CONTEXT_SIZE,
     # For flow with search, don't include as many chunks as possible since we need to leave space
     # for the chat history, for smaller models, we likely won't get MAX_CHUNKS_FED_TO_CHAT chunks
     max_document_percentage: float = CHAT_TARGET_CHUNK_PERCENTAGE,
@@ -468,6 +468,7 @@ def stream_chat_message_objects(
                 chunks=top_chunks,
                 llm_chunk_selection=llm_chunk_selection,
                 token_limit=chunk_token_limit,
+                llm_tokenizer=llm_tokenizer,
             )
             llm_chunks = [top_chunks[i] for i in llm_chunks_indices]
             llm_docs = [llm_doc_from_inference_chunk(chunk) for chunk in llm_chunks]

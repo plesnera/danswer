@@ -1,7 +1,7 @@
 import re
 from collections.abc import Callable
 from collections.abc import Iterator
-from datetime import datetime
+from collections.abc import Sequence
 from functools import lru_cache
 from typing import cast
 
@@ -9,101 +9,47 @@ from langchain.schema.messages import BaseMessage
 from langchain.schema.messages import HumanMessage
 from langchain.schema.messages import SystemMessage
 from sqlalchemy.orm import Session
+from tiktoken.core import Encoding
 
 from danswer.chat.models import CitationInfo
 from danswer.chat.models import DanswerAnswerPiece
 from danswer.chat.models import LlmDoc
 from danswer.configs.chat_configs import MULTILINGUAL_QUERY_EXPANSION
 from danswer.configs.chat_configs import STOP_STREAM_PAT
-from danswer.configs.constants import DocumentSource
 from danswer.configs.constants import IGNORE_FOR_QA
+from danswer.configs.model_configs import DOC_EMBEDDING_CONTEXT_SIZE
 from danswer.configs.model_configs import GEN_AI_SINGLE_USER_MESSAGE_EXPECTED_MAX_TOKENS
 from danswer.db.chat import get_chat_messages_by_session
+from danswer.db.chat import get_default_prompt
 from danswer.db.models import ChatMessage
 from danswer.db.models import Persona
 from danswer.db.models import Prompt
 from danswer.indexing.models import InferenceChunk
 from danswer.llm.utils import check_number_of_tokens
+from danswer.llm.utils import get_default_llm_tokenizer
 from danswer.llm.utils import get_default_llm_version
 from danswer.llm.utils import get_max_input_tokens
+from danswer.llm.utils import tokenizer_trim_content
+from danswer.prompts.chat_prompts import ADDITIONAL_INFO
 from danswer.prompts.chat_prompts import CHAT_USER_CONTEXT_FREE_PROMPT
 from danswer.prompts.chat_prompts import CHAT_USER_PROMPT
-from danswer.prompts.chat_prompts import CITATION_REMINDER
-from danswer.prompts.chat_prompts import DEFAULT_IGNORE_STATEMENT
 from danswer.prompts.chat_prompts import NO_CITATION_STATEMENT
 from danswer.prompts.chat_prompts import REQUIRE_CITATION_STATEMENT
-from danswer.prompts.constants import CODE_BLOCK_PAT
+from danswer.prompts.constants import DEFAULT_IGNORE_STATEMENT
 from danswer.prompts.constants import TRIPLE_BACKTICK
-from danswer.prompts.direct_qa_prompts import LANGUAGE_HINT
+from danswer.prompts.prompt_utils import build_complete_context_str
+from danswer.prompts.prompt_utils import build_task_prompt_reminders
 from danswer.prompts.prompt_utils import get_current_llm_day_time
+from danswer.prompts.token_counts import ADDITIONAL_INFO_TOKEN_CNT
 from danswer.prompts.token_counts import (
     CHAT_USER_PROMPT_WITH_CONTEXT_OVERHEAD_TOKEN_CNT,
 )
 from danswer.prompts.token_counts import CITATION_REMINDER_TOKEN_CNT
 from danswer.prompts.token_counts import CITATION_STATEMENT_TOKEN_CNT
 from danswer.prompts.token_counts import LANGUAGE_HINT_TOKEN_CNT
+from danswer.utils.logger import setup_logger
 
-# Maps connector enum string to a more natural language representation for the LLM
-# If not on the list, uses the original but slightly cleaned up, see below
-CONNECTOR_NAME_MAP = {
-    "web": "Website",
-    "requesttracker": "Request Tracker",
-    "github": "GitHub",
-    "file": "File Upload",
-}
-
-
-def clean_up_source(source_str: str) -> str:
-    if source_str in CONNECTOR_NAME_MAP:
-        return CONNECTOR_NAME_MAP[source_str]
-    return source_str.replace("_", " ").title()
-
-
-def build_doc_context_str(
-    semantic_identifier: str,
-    source_type: DocumentSource,
-    content: str,
-    metadata_dict: dict[str, str | list[str]],
-    updated_at: datetime | None,
-    ind: int,
-    include_metadata: bool = True,
-) -> str:
-    context_str = ""
-    if include_metadata:
-        context_str += f"DOCUMENT {ind}: {semantic_identifier}\n"
-        context_str += f"Source: {clean_up_source(source_type)}\n"
-
-        for k, v in metadata_dict.items():
-            if isinstance(v, list):
-                v_str = ", ".join(v)
-                context_str += f"{k.capitalize()}: {v_str}\n"
-            else:
-                context_str += f"{k.capitalize()}: {v}\n"
-
-        if updated_at:
-            update_str = updated_at.strftime("%B %d, %Y %H:%M")
-            context_str += f"Updated: {update_str}\n"
-    context_str += f"{CODE_BLOCK_PAT.format(content.strip())}\n\n\n"
-    return context_str
-
-
-def build_complete_context_str(
-    context_docs: list[LlmDoc | InferenceChunk],
-    include_metadata: bool = True,
-) -> str:
-    context_str = ""
-    for ind, doc in enumerate(context_docs, start=1):
-        context_str += build_doc_context_str(
-            semantic_identifier=doc.semantic_identifier,
-            source_type=doc.source_type,
-            content=doc.content,
-            metadata_dict=doc.metadata,
-            updated_at=doc.updated_at,
-            ind=ind,
-            include_metadata=include_metadata,
-        )
-
-    return context_str.strip()
+logger = setup_logger()
 
 
 @lru_cache()
@@ -122,8 +68,8 @@ def build_chat_system_message(
             system_prompt += no_citation_line
     if prompt.datetime_aware:
         if system_prompt:
-            system_prompt += (
-                f"\n\nAdditional Information:\n\t- {get_current_llm_day_time()}."
+            system_prompt += ADDITIONAL_INFO.format(
+                datetime_info=get_current_llm_day_time()
             )
         else:
             system_prompt = get_current_llm_day_time()
@@ -135,18 +81,6 @@ def build_chat_system_message(
     system_msg = SystemMessage(content=system_prompt)
 
     return system_msg, token_count
-
-
-def build_task_prompt_reminders(
-    prompt: Prompt,
-    use_language_hint: bool = bool(MULTILINGUAL_QUERY_EXPANSION),
-    citation_str: str = CITATION_REMINDER,
-    language_hint_str: str = LANGUAGE_HINT,
-) -> str:
-    base_task = prompt.task_prompt
-    citation_or_nothing = citation_str if prompt.include_citations else ""
-    language_hint_or_nothing = language_hint_str.lstrip() if use_language_hint else ""
-    return base_task + citation_or_nothing + language_hint_or_nothing
 
 
 def llm_doc_from_inference_chunk(inf_chunk: InferenceChunk) -> LlmDoc:
@@ -162,7 +96,7 @@ def llm_doc_from_inference_chunk(inf_chunk: InferenceChunk) -> LlmDoc:
 
 
 def map_document_id_order(
-    chunks: list[InferenceChunk | LlmDoc], one_indexed: bool = True
+    chunks: Sequence[InferenceChunk | LlmDoc], one_indexed: bool = True
 ) -> dict[str, int]:
     order_mapping = {}
     current = 1 if one_indexed else 0
@@ -270,6 +204,7 @@ def get_chunks_for_qa(
     chunks: list[InferenceChunk],
     llm_chunk_selection: list[bool],
     token_limit: int | None,
+    llm_tokenizer: Encoding | None = None,
     batch_offset: int = 0,
 ) -> list[int]:
     """
@@ -282,6 +217,7 @@ def get_chunks_for_qa(
     there's no way to know which chunks were included in the prior batches without recounting atm,
     this is somewhat slow as it requires tokenizing all the chunks again
     """
+    token_leeway = 50
     batch_index = 0
     latest_batch_indices: list[int] = []
     token_count = 0
@@ -296,8 +232,19 @@ def get_chunks_for_qa(
 
             # We calculate it live in case the user uses a different LLM + tokenizer
             chunk_token = check_number_of_tokens(chunk.content)
+            if chunk_token > DOC_EMBEDDING_CONTEXT_SIZE + token_leeway:
+                logger.warning(
+                    "Found more tokens in chunk than expected, "
+                    "likely mismatch between embedding and LLM tokenizers. Trimming content..."
+                )
+                chunk.content = tokenizer_trim_content(
+                    content=chunk.content,
+                    desired_length=DOC_EMBEDDING_CONTEXT_SIZE,
+                    tokenizer=llm_tokenizer or get_default_llm_tokenizer(),
+                )
+
             # 50 for an approximate/slight overestimate for # tokens for metadata for the chunk
-            token_count += chunk_token + 50
+            token_count += chunk_token + token_leeway
 
             # Always use at least 1 chunk
             if (
@@ -545,7 +492,65 @@ def extract_citations_from_stream(
             yield DanswerAnswerPiece(answer_piece=curr_segment)
 
 
+def reorganize_citations(
+    answer: str, citations: list[CitationInfo]
+) -> tuple[str, list[CitationInfo]]:
+    """For a complete, citation-aware response, we want to reorganize the citations so that
+    they are in the order of the documents that were used in the response. This just looks nicer / avoids
+    confusion ("Why is there [7] when only 2 documents are cited?")."""
+
+    # Regular expression to find all instances of [[x]](LINK)
+    pattern = r"\[\[(.*?)\]\]\((.*?)\)"
+
+    all_citation_matches = re.findall(pattern, answer)
+
+    new_citation_info: dict[int, CitationInfo] = {}
+    for citation_match in all_citation_matches:
+        try:
+            citation_num = int(citation_match[0])
+            if citation_num in new_citation_info:
+                continue
+
+            matching_citation = next(
+                iter([c for c in citations if c.citation_num == int(citation_num)]),
+                None,
+            )
+            if matching_citation is None:
+                continue
+
+            new_citation_info[citation_num] = CitationInfo(
+                citation_num=len(new_citation_info) + 1,
+                document_id=matching_citation.document_id,
+            )
+        except Exception:
+            pass
+
+    # Function to replace citations with their new number
+    def slack_link_format(match: re.Match) -> str:
+        link_text = match.group(1)
+        try:
+            citation_num = int(link_text)
+            if citation_num in new_citation_info:
+                link_text = new_citation_info[citation_num].citation_num
+        except Exception:
+            pass
+
+        link_url = match.group(2)
+        return f"[[{link_text}]]({link_url})"
+
+    # Substitute all matches in the input text
+    new_answer = re.sub(pattern, slack_link_format, answer)
+
+    # if any citations weren't parsable, just add them back to be safe
+    for citation in citations:
+        if citation.citation_num not in new_citation_info:
+            new_citation_info[citation.citation_num] = citation
+
+    return new_answer, list(new_citation_info.values())
+
+
 def get_prompt_tokens(prompt: Prompt) -> int:
+    # Note: currently custom prompts do not allow datetime aware, only default prompts
     return (
         check_number_of_tokens(prompt.system_prompt)
         + check_number_of_tokens(prompt.task_prompt)
@@ -553,6 +558,7 @@ def get_prompt_tokens(prompt: Prompt) -> int:
         + CITATION_STATEMENT_TOKEN_CNT
         + CITATION_REMINDER_TOKEN_CNT
         + (LANGUAGE_HINT_TOKEN_CNT if bool(MULTILINGUAL_QUERY_EXPANSION) else 0)
+        + (ADDITIONAL_INFO_TOKEN_CNT if prompt.datetime_aware else 0)
     )
 
 
@@ -591,7 +597,8 @@ def compute_max_document_tokens(
         # TODO this may not always be the first prompt
         prompt_tokens = get_prompt_tokens(persona.prompts[0])
     else:
-        raise RuntimeError("Persona has no prompts - this should never happen")
+        prompt_tokens = get_prompt_tokens(get_default_prompt())
+
     user_input_tokens = (
         check_number_of_tokens(actual_user_input)
         if actual_user_input is not None
