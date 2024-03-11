@@ -1,4 +1,5 @@
 import time
+import base64
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timedelta
@@ -9,6 +10,7 @@ from typing import cast
 from github import Github
 from github import RateLimitExceededException
 from github import Repository
+from github import ContentFile
 from github.Issue import Issue
 from github.PaginatedList import PaginatedList
 from github.PullRequest import PullRequest
@@ -116,6 +118,26 @@ def _convert_issue_to_document(issue: Issue) -> Document:
     )
 
 
+def _convert_element_to_document(content: ContentFile) -> Document:
+    raw_bytes = base64.b64decode(content.content)
+    dt = datetime.strptime(content.last_modified, '%a, %d %b %Y %H:%M:%S %Z')
+    # Set the timezone to UTC
+    dt = dt.replace(tzinfo=timezone.utc)
+
+    return Document(
+            id=content.html_url,
+            sections=[Section(link=content.html_url, text=raw_bytes.decode('utf-8'))],
+            source=DocumentSource.GITHUB,
+            semantic_identifier=content.name,
+            # updated_at is UTC time but is timezone unaware
+            doc_updated_at=dt,
+            metadata={
+                "path": content.path,
+            },
+        )
+
+
+
 class GithubConnector(LoadConnector, PollConnector):
     def __init__(
         self,
@@ -125,6 +147,7 @@ class GithubConnector(LoadConnector, PollConnector):
         state_filter: str = "all",
         include_prs: bool = True,
         include_issues: bool = False,
+        include_code: bool = True
     ) -> None:
         self.repo_owner = repo_owner
         self.repo_name = repo_name
@@ -132,6 +155,7 @@ class GithubConnector(LoadConnector, PollConnector):
         self.state_filter = state_filter
         self.include_prs = include_prs
         self.include_issues = include_issues
+        self.include_code = include_code
         self.github_client: Github | None = None
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
@@ -158,6 +182,8 @@ class GithubConnector(LoadConnector, PollConnector):
             _sleep_after_rate_limit_exception(github_client)
             return self._get_github_repo(github_client, attempt_num + 1)
 
+
+
     def _fetch_from_github(
         self, start: datetime | None = None, end: datetime | None = None
     ) -> GenerateDocumentsOutput:
@@ -165,6 +191,18 @@ class GithubConnector(LoadConnector, PollConnector):
             raise ConnectorMissingCredentialError("GitHub")
 
         repo = self._get_github_repo(self.github_client)
+        branch = repo.get_branch('main')
+
+        if self.include_code:
+            content_tree = repo.get_git_tree(branch.commit.sha, recursive=True)
+            doc_batch: list[Document] = []
+            for git_tree_element in content_tree.tree:
+                if git_tree_element.type != 'tree':
+                    element_content = repo.get_contents(git_tree_element.path)
+                    element_doc = _convert_element_to_document(element_content)
+                    doc_batch.append(element_doc)
+            yield doc_batch
+
 
         if self.include_prs:
             pull_requests = repo.get_pulls(
