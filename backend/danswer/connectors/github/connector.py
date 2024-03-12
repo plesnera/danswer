@@ -34,6 +34,13 @@ logger = setup_logger()
 
 _MAX_NUM_RATE_LIMIT_RETRIES = 5
 
+def _is_valid_utf8(byte_string):
+    try:
+        byte_string.decode('utf-8')
+        return True
+    except UnicodeDecodeError:
+        return False
+
 
 def _sleep_after_rate_limit_exception(github_client: Github) -> None:
     sleep_time = github_client.get_rate_limit().core.reset.replace(
@@ -118,15 +125,12 @@ def _convert_issue_to_document(issue: Issue) -> Document:
     )
 
 
-def _convert_element_to_document(content: ContentFile) -> Document:
-    raw_bytes = base64.b64decode(content.content)
-    dt = datetime.strptime(content.last_modified, '%a, %d %b %Y %H:%M:%S %Z')
+def _convert_element_to_document(content: ContentFile, content_text) -> Document:
     # Set the timezone to UTC
-    dt = dt.replace(tzinfo=timezone.utc)
-
+    dt = datetime.strptime(content.last_modified, '%a, %d %b %Y %H:%M:%S %Z').replace(tzinfo=timezone.utc)
     return Document(
             id=content.html_url,
-            sections=[Section(link=content.html_url, text=raw_bytes.decode('utf-8'))],
+            sections=[Section(link=content.html_url, text=content_text)],
             source=DocumentSource.GITHUB,
             semantic_identifier=content.name,
             # updated_at is UTC time but is timezone unaware
@@ -143,6 +147,7 @@ class GithubConnector(LoadConnector, PollConnector):
         self,
         repo_owner: str,
         repo_name: str,
+        repo_branch: str,
         batch_size: int = INDEX_BATCH_SIZE,
         state_filter: str = "all",
         include_prs: bool = True,
@@ -151,6 +156,7 @@ class GithubConnector(LoadConnector, PollConnector):
     ) -> None:
         self.repo_owner = repo_owner
         self.repo_name = repo_name
+        self.repo_branch = repo_branch
         self.batch_size = batch_size
         self.state_filter = state_filter
         self.include_prs = include_prs
@@ -191,7 +197,7 @@ class GithubConnector(LoadConnector, PollConnector):
             raise ConnectorMissingCredentialError("GitHub")
 
         repo = self._get_github_repo(self.github_client)
-        branch = repo.get_branch('main')
+        branch = repo.get_branch(self.repo_branch)
 
         if self.include_code:
             content_tree = repo.get_git_tree(branch.commit.sha, recursive=True)
@@ -199,8 +205,13 @@ class GithubConnector(LoadConnector, PollConnector):
             for git_tree_element in content_tree.tree:
                 if git_tree_element.type != 'tree':
                     element_content = repo.get_contents(git_tree_element.path)
-                    element_doc = _convert_element_to_document(element_content)
-                    doc_batch.append(element_doc)
+                    raw_bytes = base64.b64decode(element_content.content)
+                    if _is_valid_utf8(raw_bytes):
+                        decoded_text=raw_bytes.decode('utf-8')
+                        element_doc = _convert_element_to_document(element_content,decoded_text)
+                        doc_batch.append(element_doc)
+                    else:
+                        print("Not valid utf-8 encoded document - skipped: " + element_content.html_url)
             yield doc_batch
 
 
@@ -271,6 +282,7 @@ if __name__ == "__main__":
     connector = GithubConnector(
         repo_owner=os.environ["REPO_OWNER"],
         repo_name=os.environ["REPO_NAME"],
+        repo_branch=os.environ["REPO_BRANCH"]
     )
     connector.load_credentials(
         {"github_access_token": os.environ["GITHUB_ACCESS_TOKEN"]}

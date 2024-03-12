@@ -76,6 +76,7 @@ export interface WebConfig {
 export interface GithubConfig {
   repo_owner: string;
   repo_name: string;
+  repo_branch: string;
   include_prs: boolean;
   include_issues: boolean;
 }

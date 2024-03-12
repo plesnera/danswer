@@ -191,6 +191,7 @@ const Main = () => {
               <>
                 <TextFormField name="repo_owner" label="Repository Owner:" />
                 <TextFormField name="repo_name" label="Repository Name:" />
+                <TextFormField name="repo_branch" label="Repository Branch:" />
               </>
             }
             validationSchema={Yup.object().shape({
@@ -200,12 +201,16 @@ const Main = () => {
               repo_name: Yup.string().required(
                 "Please enter the name of the repository to index e.g. danswer "
               ),
+              repo_branch: Yup.string().required(
+                  "Please enter the branch name to index e.g. main "
+              ),
               include_prs: Yup.boolean().required(),
               include_issues: Yup.boolean().required(),
             })}
             initialValues={{
               repo_owner: "",
               repo_name: "",
+              repo_branch: "",
               include_prs: true,
               include_issues: true,
             }}
