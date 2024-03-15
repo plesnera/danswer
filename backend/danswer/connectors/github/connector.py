@@ -6,6 +6,7 @@ from datetime import timedelta
 from datetime import timezone
 from typing import Any
 from typing import cast
+from pathlib import Path
 
 from github import Github
 from github import RateLimitExceededException
@@ -27,19 +28,13 @@ from danswer.connectors.models import Document
 from danswer.connectors.models import Section
 from danswer.utils.batching import batch_generator
 from danswer.utils.logger import setup_logger
-
+from danswer.connectors.github.utils import (_clone_repo, _compile_ignore_patterns, _list_files_to_ignore_in_repo,
+                                             _process_repo, _remove_temp_repo, _is_valid_utf8)
 
 logger = setup_logger()
 
 
 _MAX_NUM_RATE_LIMIT_RETRIES = 5
-
-def _is_valid_utf8(byte_string):
-    try:
-        byte_string.decode('utf-8')
-        return True
-    except UnicodeDecodeError:
-        return False
 
 
 def _sleep_after_rate_limit_exception(github_client: Github) -> None:
@@ -152,7 +147,9 @@ class GithubConnector(LoadConnector, PollConnector):
         state_filter: str = "all",
         include_prs: bool = True,
         include_issues: bool = False,
-        include_code: bool = True
+        include_code: bool = True,
+        download_repo: bool = True,
+        temp_local_storage: str= '/temp'
     ) -> None:
         self.repo_owner = repo_owner
         self.repo_name = repo_name
@@ -163,6 +160,8 @@ class GithubConnector(LoadConnector, PollConnector):
         self.include_issues = include_issues
         self.include_code = include_code
         self.github_client: Github | None = None
+        self.download_repo = download_repo
+        self.temp_local_storage = temp_local_storage
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
         self.github_client = (
@@ -193,15 +192,28 @@ class GithubConnector(LoadConnector, PollConnector):
     def _fetch_from_github(
         self, start: datetime | None = None, end: datetime | None = None
     ) -> GenerateDocumentsOutput:
+
         if self.github_client is None:
             raise ConnectorMissingCredentialError("GitHub")
 
         repo = self._get_github_repo(self.github_client)
-        branch = repo.get_branch(self.repo_branch)
 
-        if self.include_code:
-            content_tree = repo.get_git_tree(branch.commit.sha, recursive=True)
+        if self.include_code and self.download_repo:
             doc_batch: list[Document] = []
+            repo_path = _clone_repo(owner=self.repo_owner, repository=self.repo_name,token=os.environ['GITHUB_ACCESS_TOKEN'])
+            # outputs a combined list of files to ignore looking for the .gitignore as well as an additional .gptignore file
+            combine_ignore_lists = _compile_ignore_patterns(repo_path=repo_path, ignore_file_path=Path('.gptignore'), use_gitignore=True)
+            # returns a list object of any file in the repo matching the ignore criteria
+            files_to_ignore = _list_files_to_ignore_in_repo(combine_ignore_lists, repo_path)
+            # traverses repo and creates
+            doc_batch=_process_repo(repo_path, files_to_ignore, doc_batch)
+            # _remove_temp_repo(repo_path)
+            yield doc_batch
+
+        if self.include_code and not self.download_repo:
+            branch = repo.get_branch(self.repo_branch)
+            content_tree = repo.get_git_tree(branch.commit.sha, recursive=True)
+
             for git_tree_element in content_tree.tree:
                 if git_tree_element.type != 'tree':
                     element_content = repo.get_contents(git_tree_element.path)
@@ -219,11 +231,11 @@ class GithubConnector(LoadConnector, PollConnector):
             pull_requests = repo.get_pulls(
                 state=self.state_filter, sort="updated", direction="desc"
             )
-
+            doc_batch: list[Document] = []
             for pr_batch in _batch_github_objects(
                 pull_requests, self.github_client, self.batch_size
             ):
-                doc_batch: list[Document] = []
+
                 for pr in pr_batch:
                     if start is not None and pr.updated_at < start:
                         yield doc_batch

@@ -1,0 +1,15 @@
+.git/**/*
+.gitignore
+**/*.ico
+**/*.png
+**/*.dockerignore
+**/*.prettierignore
+**/*.svg
+**/*.webp
+**/*.csv
+**/*.tsv
+**/*.xlsx
+**/*.xls
+**/*.bazel
+**/*.dazel
+
