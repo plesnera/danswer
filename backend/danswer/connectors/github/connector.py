@@ -198,6 +198,8 @@ class GithubConnector(LoadConnector, PollConnector):
 
         repo = self._get_github_repo(self.github_client)
 
+        # For large repos, Github rate limiting can be a problem and there's therefore an option here to use
+        # the repo clone method to download the repo locally and then process it.
         if self.include_code and self.download_repo:
             doc_batch: list[Document] = []
             repo_path = _clone_repo(owner=self.repo_owner, repository=self.repo_name,token=os.environ['GITHUB_ACCESS_TOKEN'])
@@ -210,6 +212,7 @@ class GithubConnector(LoadConnector, PollConnector):
             # _remove_temp_repo(repo_path)
             yield doc_batch
 
+        # The more proper method of just calling the API to use the tree and get_contents method
         if self.include_code and not self.download_repo:
             branch = repo.get_branch(self.repo_branch)
             content_tree = repo.get_git_tree(branch.commit.sha, recursive=True)
