@@ -1,8 +1,9 @@
+import contextlib
 from collections.abc import AsyncGenerator
 from collections.abc import Generator
 from datetime import datetime
+from typing import ContextManager
 
-from ddtrace import tracer
 from sqlalchemy import text
 from sqlalchemy.engine import create_engine
 from sqlalchemy.engine import Engine
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import sessionmaker
 
 from danswer.configs.app_configs import POSTGRES_DB
 from danswer.configs.app_configs import POSTGRES_HOST
@@ -57,7 +59,7 @@ def get_sqlalchemy_engine() -> Engine:
     global _SYNC_ENGINE
     if _SYNC_ENGINE is None:
         connection_string = build_connection_string(db_api=SYNC_DB_API)
-        _SYNC_ENGINE = create_engine(connection_string)
+        _SYNC_ENGINE = create_engine(connection_string, pool_size=50, max_overflow=25)
     return _SYNC_ENGINE
 
 
@@ -69,10 +71,16 @@ def get_sqlalchemy_async_engine() -> AsyncEngine:
     return _ASYNC_ENGINE
 
 
+def get_session_context_manager() -> ContextManager:
+    return contextlib.contextmanager(get_session)()
+
+
 def get_session() -> Generator[Session, None, None]:
-    with tracer.trace("db.get_session"):
-        with Session(get_sqlalchemy_engine(), expire_on_commit=False) as session:
-            yield session
+    # The line below was added to monitor the latency caused by Postgres connections
+    # during API calls.
+    # with tracer.trace("db.get_session"):
+    with Session(get_sqlalchemy_engine(), expire_on_commit=False) as session:
+        yield session
 
 
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
@@ -80,3 +88,6 @@ async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
         get_sqlalchemy_async_engine(), expire_on_commit=False
     ) as async_session:
         yield async_session
+
+
+SessionFactory = sessionmaker(bind=get_sqlalchemy_engine())

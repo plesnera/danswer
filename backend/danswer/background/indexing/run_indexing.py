@@ -142,6 +142,7 @@ def _run_indexing(
         document_index=document_index,
         ignore_time_skip=index_attempt.from_beginning
         or (db_embedding_model.status == IndexModelStatus.FUTURE),
+        db_session=db_session,
     )
 
     db_connector = index_attempt.connector
@@ -330,19 +331,14 @@ def _run_indexing(
     )
 
 
-def run_indexing_entrypoint(index_attempt_id: int, num_threads: int) -> None:
+def run_indexing_entrypoint(index_attempt_id: int) -> None:
     """Entrypoint for indexing run when using dask distributed.
     Wraps the actual logic in a `try` block so that we can catch any exceptions
     and mark the attempt as failed."""
-    import torch
-
     try:
         # set the indexing attempt ID so that all log messages from this process
         # will have it added as a prefix
         IndexAttemptSingleton.set_index_attempt_id(index_attempt_id)
-
-        logger.info(f"Setting task to use {num_threads} threads")
-        torch.set_num_threads(num_threads)
 
         with Session(get_sqlalchemy_engine()) as db_session:
             attempt = get_index_attempt(

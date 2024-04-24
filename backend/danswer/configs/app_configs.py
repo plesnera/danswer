@@ -95,6 +95,9 @@ DOCUMENT_INDEX_TYPE = os.environ.get(
     "DOCUMENT_INDEX_TYPE", DocumentIndexType.COMBINED.value
 )
 VESPA_HOST = os.environ.get("VESPA_HOST") or "localhost"
+# NOTE: this is used if and only if the vespa config server is accessible via a
+# different host than the main vespa application
+VESPA_CONFIG_SERVER_HOST = os.environ.get("VESPA_CONFIG_SERVER_HOST") or VESPA_HOST
 VESPA_PORT = os.environ.get("VESPA_PORT") or "8081"
 VESPA_TENANT_PORT = os.environ.get("VESPA_TENANT_PORT") or "19071"
 # The default below is for dockerized deployment
@@ -157,6 +160,11 @@ CONFLUENCE_CONNECTOR_LABELS_TO_SKIP = [
     )
     if ignored_tag
 ]
+JIRA_CONNECTOR_LABELS_TO_SKIP = [
+    ignored_tag
+    for ignored_tag in os.environ.get("JIRA_CONNECTOR_LABELS_TO_SKIP", "").split(",")
+    if ignored_tag
+]
 
 GONG_CONNECTOR_START_TIME = os.environ.get("GONG_CONNECTOR_START_TIME")
 
@@ -205,27 +213,10 @@ DISABLE_DOCUMENT_CLEANUP = (
 
 
 #####
-# Model Server Configs
-#####
-# If MODEL_SERVER_HOST is set, the NLP models required for Danswer are offloaded to the server via
-# requests. Be sure to include the scheme in the MODEL_SERVER_HOST value.
-MODEL_SERVER_HOST = os.environ.get("MODEL_SERVER_HOST") or None
-MODEL_SERVER_ALLOWED_HOST = os.environ.get("MODEL_SERVER_HOST") or "0.0.0.0"
-MODEL_SERVER_PORT = int(os.environ.get("MODEL_SERVER_PORT") or "9000")
-
-# specify this env variable directly to have a different model server for the background
-# indexing job vs the api server so that background indexing does not effect query-time
-# performance
-INDEXING_MODEL_SERVER_HOST = (
-    os.environ.get("INDEXING_MODEL_SERVER_HOST") or MODEL_SERVER_HOST
-)
-
-
-#####
 # Miscellaneous
 #####
-DYNAMIC_CONFIG_STORE = os.environ.get(
-    "DYNAMIC_CONFIG_STORE", "FileSystemBackedDynamicConfigStore"
+DYNAMIC_CONFIG_STORE = (
+    os.environ.get("DYNAMIC_CONFIG_STORE") or "PostgresBackedDynamicConfigStore"
 )
 DYNAMIC_CONFIG_DIR_PATH = os.environ.get("DYNAMIC_CONFIG_DIR_PATH", "/home/storage")
 JOB_TIMEOUT = 60 * 60 * 6  # 6 hours default
@@ -245,5 +236,7 @@ LOG_VESPA_TIMING_INFORMATION = (
 )
 # Anonymous usage telemetry
 DISABLE_TELEMETRY = os.environ.get("DISABLE_TELEMETRY", "").lower() == "true"
-# notset, debug, info, warning, error, or critical
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "info")
+
+TOKEN_BUDGET_GLOBALLY_ENABLED = (
+    os.environ.get("TOKEN_BUDGET_GLOBALLY_ENABLED", "").lower() == "true"
+)
