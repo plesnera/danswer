@@ -206,6 +206,9 @@ const Main = () => {
               ),
               include_prs: Yup.boolean().required(),
               include_issues: Yup.boolean().required(),
+              clone_to_disk: Yup.boolean().required(
+                    "To avoid Github rate limiting, please specify if this repo should be cloned to a temp directory"
+              )
             })}
             initialValues={{
               repo_owner: "",
@@ -213,6 +216,7 @@ const Main = () => {
               repo_branch: "",
               include_prs: true,
               include_issues: true,
+              clone_to_disk: true,
             }}
             refreshFreq={10 * 60} // 10 minutes
             credentialId={githubCredential.id}

@@ -79,6 +79,7 @@ export interface GithubConfig {
   repo_branch: string;
   include_prs: boolean;
   include_issues: boolean;
+  clone_to_disk: boolean;
 }
 
 export interface GitlabConfig {
