@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from danswer.configs.constants import DocumentSource
 from danswer.configs.constants import INDEX_SEPARATOR
+from danswer.configs.constants import RETURN_SEPARATOR
 from danswer.utils.text_processing import make_url_compatible
 
 
@@ -13,6 +14,7 @@ class InputType(str, Enum):
     LOAD_STATE = "load_state"  # e.g. loading a current full state or a save state, such as from a file
     POLL = "poll"  # e.g. calling an API to get all documents in the last hour
     EVENT = "event"  # e.g. registered an endpoint as a listener, and processing connector events
+    PRUNE = "prune"
 
 
 class ConnectorMissingCredentialError(PermissionError):
@@ -112,11 +114,18 @@ class DocumentBase(BaseModel):
     title: str | None = None
     from_ingestion_api: bool = False
 
-    def get_title_for_document_index(self) -> str | None:
+    def get_title_for_document_index(
+        self,
+    ) -> str | None:
         # If title is explicitly empty, return a None here for embedding purposes
         if self.title == "":
             return None
-        return self.semantic_identifier if self.title is None else self.title
+        replace_chars = set(RETURN_SEPARATOR)
+        title = self.semantic_identifier if self.title is None else self.title
+        for char in replace_chars:
+            title = title.replace(char, " ")
+        title = title.strip()
+        return title
 
     def get_metadata_str_attributes(self) -> list[str] | None:
         if not self.metadata:

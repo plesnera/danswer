@@ -10,10 +10,12 @@ interface PersonaCreationRequest {
   include_citations: boolean;
   is_public: boolean;
   llm_relevance_filter: boolean | null;
+  llm_model_provider_override: string | null;
   llm_model_version_override: string | null;
   starter_messages: StarterMessage[] | null;
   users?: string[];
   groups: number[];
+  tool_ids: number[]; // Added tool_ids to the interface
 }
 
 interface PersonaUpdateRequest {
@@ -28,10 +30,12 @@ interface PersonaUpdateRequest {
   include_citations: boolean;
   is_public: boolean;
   llm_relevance_filter: boolean | null;
+  llm_model_provider_override: string | null;
   llm_model_version_override: string | null;
   starter_messages: StarterMessage[] | null;
   users?: string[];
   groups: number[];
+  tool_ids: number[]; // Added tool_ids to the interface
 }
 
 function promptNameFromPersonaName(personaName: string) {
@@ -105,6 +109,7 @@ function buildPersonaAPIBody(
     is_public,
     groups,
     users,
+    tool_ids, // Added tool_ids to the destructuring
   } = creationRequest;
 
   return {
@@ -117,10 +122,12 @@ function buildPersonaAPIBody(
     recency_bias: "base_decay",
     prompt_ids: [promptId],
     document_set_ids,
+    llm_model_provider_override: creationRequest.llm_model_provider_override,
     llm_model_version_override: creationRequest.llm_model_version_override,
     starter_messages: creationRequest.starter_messages,
     users,
     groups,
+    tool_ids, // Added tool_ids to the return object
   };
 }
 

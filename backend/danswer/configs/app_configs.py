@@ -1,8 +1,10 @@
+import json
 import os
+import urllib.parse
 
 from danswer.configs.constants import AuthType
 from danswer.configs.constants import DocumentIndexType
-
+from danswer.file_processing.enums import HtmlBasedConnectorTransformLinksStrategy
 
 #####
 # App Configs
@@ -41,12 +43,17 @@ WEB_DOMAIN = os.environ.get("WEB_DOMAIN") or "http://localhost:3000"
 AUTH_TYPE = AuthType((os.environ.get("AUTH_TYPE") or AuthType.DISABLED.value).lower())
 DISABLE_AUTH = AUTH_TYPE == AuthType.DISABLED
 
+# Encryption key secret is used to encrypt connector credentials, api keys, and other sensitive
+# information. This provides an extra layer of security on top of Postgres access controls
+# and is available in Danswer EE
+ENCRYPTION_KEY_SECRET = os.environ.get("ENCRYPTION_KEY_SECRET") or ""
+
 # Turn off mask if admin users should see full credentials for data connectors.
 MASK_CREDENTIAL_PREFIX = (
     os.environ.get("MASK_CREDENTIAL_PREFIX", "True").lower() != "false"
 )
 
-SECRET = os.environ.get("SECRET", "")
+
 SESSION_EXPIRE_TIME_SECONDS = int(
     os.environ.get("SESSION_EXPIRE_TIME_SECONDS") or 86400 * 7
 )  # 7 days
@@ -75,6 +82,7 @@ OAUTH_CLIENT_SECRET = (
     or ""
 )
 
+USER_AUTH_SECRET = os.environ.get("USER_AUTH_SECRET", "")
 # for basic auth
 REQUIRE_EMAIL_VERIFICATION = (
     os.environ.get("REQUIRE_EMAIL_VERIFICATION", "").lower() == "true"
@@ -113,7 +121,10 @@ except ValueError:
 # Below are intended to match the env variables names used by the official postgres docker image
 # https://hub.docker.com/_/postgres
 POSTGRES_USER = os.environ.get("POSTGRES_USER") or "postgres"
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD") or "password"
+# URL-encode the password for asyncpg to avoid issues with special characters on some machines.
+POSTGRES_PASSWORD = urllib.parse.quote_plus(
+    os.environ.get("POSTGRES_PASSWORD") or "password"
+)
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST") or "localhost"
 POSTGRES_PORT = os.environ.get("POSTGRES_PORT") or "5432"
 POSTGRES_DB = os.environ.get("POSTGRES_DB") or "postgres"
@@ -124,6 +135,12 @@ POSTGRES_DB = os.environ.get("POSTGRES_DB") or "postgres"
 #####
 POLL_CONNECTOR_OFFSET = 30  # Minutes overlap between poll windows
 
+# View the list here:
+# https://github.com/danswer-ai/danswer/blob/main/backend/danswer/connectors/factory.py
+# If this is empty, all connectors are enabled, this is an option for security heavy orgs where
+# only very select connectors are enabled and admins cannot add other connector types
+ENABLED_CONNECTOR_TYPES = os.environ.get("ENABLED_CONNECTOR_TYPES") or ""
+
 # Some calls to get information on expert users are quite costly especially with rate limiting
 # Since experts are not used in the actual user experience, currently it is turned off
 # for some connectors
@@ -132,10 +149,6 @@ ENABLE_EXPENSIVE_EXPERT_CALLS = False
 GOOGLE_DRIVE_INCLUDE_SHARED = False
 GOOGLE_DRIVE_FOLLOW_SHORTCUTS = False
 GOOGLE_DRIVE_ONLY_ORG_PUBLIC = False
-
-FILE_CONNECTOR_TMP_STORAGE_PATH = os.environ.get(
-    "FILE_CONNECTOR_TMP_STORAGE_PATH", "/home/file_connector_storage"
-)
 
 # TODO these should be available for frontend configuration, via advanced options expandable
 WEB_CONNECTOR_IGNORED_CLASSES = os.environ.get(
@@ -147,6 +160,12 @@ WEB_CONNECTOR_IGNORED_ELEMENTS = os.environ.get(
 WEB_CONNECTOR_OAUTH_CLIENT_ID = os.environ.get("WEB_CONNECTOR_OAUTH_CLIENT_ID")
 WEB_CONNECTOR_OAUTH_CLIENT_SECRET = os.environ.get("WEB_CONNECTOR_OAUTH_CLIENT_SECRET")
 WEB_CONNECTOR_OAUTH_TOKEN_URL = os.environ.get("WEB_CONNECTOR_OAUTH_TOKEN_URL")
+WEB_CONNECTOR_VALIDATE_URLS = os.environ.get("WEB_CONNECTOR_VALIDATE_URLS")
+
+HTML_BASED_CONNECTOR_TRANSFORM_LINKS_STRATEGY = os.environ.get(
+    "HTML_BASED_CONNECTOR_TRANSFORM_LINKS_STRATEGY",
+    HtmlBasedConnectorTransformLinksStrategy.STRIP,
+)
 
 NOTION_CONNECTOR_ENABLE_RECURSIVE_PAGE_LOOKUP = (
     os.environ.get("NOTION_CONNECTOR_ENABLE_RECURSIVE_PAGE_LOOKUP", "").lower()
@@ -160,6 +179,18 @@ CONFLUENCE_CONNECTOR_LABELS_TO_SKIP = [
     )
     if ignored_tag
 ]
+
+# Avoid to get archived pages
+CONFLUENCE_CONNECTOR_INDEX_ONLY_ACTIVE_PAGES = (
+    os.environ.get("CONFLUENCE_CONNECTOR_INDEX_ONLY_ACTIVE_PAGES", "").lower() == "true"
+)
+
+# Save pages labels as Danswer metadata tags
+# The reason to skip this would be to reduce the number of calls to Confluence due to rate limit concerns
+CONFLUENCE_CONNECTOR_SKIP_LABEL_INDEXING = (
+    os.environ.get("CONFLUENCE_CONNECTOR_SKIP_LABEL_INDEXING", "").lower() == "true"
+)
+
 JIRA_CONNECTOR_LABELS_TO_SKIP = [
     ignored_tag
     for ignored_tag in os.environ.get("JIRA_CONNECTOR_LABELS_TO_SKIP", "").split(",")
@@ -170,12 +201,32 @@ GONG_CONNECTOR_START_TIME = os.environ.get("GONG_CONNECTOR_START_TIME")
 
 GITHUB_CONNECTOR_BASE_URL = os.environ.get("GITHUB_CONNECTOR_BASE_URL") or None
 
+GITLAB_CONNECTOR_INCLUDE_CODE_FILES = (
+    os.environ.get("GITLAB_CONNECTOR_INCLUDE_CODE_FILES", "").lower() == "true"
+)
+
 DASK_JOB_CLIENT_ENABLED = (
     os.environ.get("DASK_JOB_CLIENT_ENABLED", "").lower() == "true"
 )
 EXPERIMENTAL_CHECKPOINTING_ENABLED = (
     os.environ.get("EXPERIMENTAL_CHECKPOINTING_ENABLED", "").lower() == "true"
 )
+
+DEFAULT_PRUNING_FREQ = 60 * 60 * 24  # Once a day
+
+ALLOW_SIMULTANEOUS_PRUNING = (
+    os.environ.get("ALLOW_SIMULTANEOUS_PRUNING", "").lower() == "true"
+)
+
+# This is the maxiumum rate at which documents are queried for a pruning job. 0 disables the limitation.
+MAX_PRUNING_DOCUMENT_RETRIEVAL_PER_MINUTE = int(
+    os.environ.get("MAX_PRUNING_DOCUMENT_RETRIEVAL_PER_MINUTE", 0)
+)
+
+# comma delimited list of zendesk article labels to skip indexing for
+ZENDESK_CONNECTOR_SKIP_ARTICLE_LABELS = os.environ.get(
+    "ZENDESK_CONNECTOR_SKIP_ARTICLE_LABELS", ""
+).split(",")
 
 
 #####
@@ -197,46 +248,66 @@ DISABLE_INDEX_UPDATE_ON_SWAP = (
 # fairly large amount of memory in order to increase substantially, since
 # each worker loads the embedding models into memory.
 NUM_INDEXING_WORKERS = int(os.environ.get("NUM_INDEXING_WORKERS") or 1)
-CHUNK_OVERLAP = 0
 # More accurate results at the expense of indexing speed and index size (stores additional 4 MINI_CHUNK vectors)
 ENABLE_MINI_CHUNK = os.environ.get("ENABLE_MINI_CHUNK", "").lower() == "true"
 # Finer grained chunking for more detail retention
 # Slightly larger since the sentence aware split is a max cutoff so most minichunks will be under MINI_CHUNK_SIZE
 # tokens. But we need it to be at least as big as 1/4th chunk size to avoid having a tiny mini-chunk at the end
 MINI_CHUNK_SIZE = 150
+# Include the document level metadata in each chunk. If the metadata is too long, then it is thrown out
+# We don't want the metadata to overwhelm the actual contents of the chunk
+SKIP_METADATA_IN_CHUNK = os.environ.get("SKIP_METADATA_IN_CHUNK", "").lower() == "true"
 # Timeout to wait for job's last update before killing it, in hours
 CLEANUP_INDEXING_JOBS_TIMEOUT = int(os.environ.get("CLEANUP_INDEXING_JOBS_TIMEOUT", 3))
-# If set to true, then will not clean up documents that "no longer exist" when running Load connectors
-DISABLE_DOCUMENT_CLEANUP = (
-    os.environ.get("DISABLE_DOCUMENT_CLEANUP", "").lower() == "true"
-)
 
 
 #####
 # Miscellaneous
 #####
-DYNAMIC_CONFIG_STORE = (
-    os.environ.get("DYNAMIC_CONFIG_STORE") or "PostgresBackedDynamicConfigStore"
-)
-DYNAMIC_CONFIG_DIR_PATH = os.environ.get("DYNAMIC_CONFIG_DIR_PATH", "/home/storage")
+# File based Key Value store no longer used
+DYNAMIC_CONFIG_STORE = "PostgresBackedDynamicConfigStore"
+
 JOB_TIMEOUT = 60 * 60 * 6  # 6 hours default
 # used to allow the background indexing jobs to use a different embedding
 # model server than the API server
 CURRENT_PROCESS_IS_AN_INDEXING_JOB = (
     os.environ.get("CURRENT_PROCESS_IS_AN_INDEXING_JOB", "").lower() == "true"
 )
-# Logs every model prompt and output, mostly used for development or exploration purposes
+# Sets LiteLLM to verbose logging
 LOG_ALL_MODEL_INTERACTIONS = (
     os.environ.get("LOG_ALL_MODEL_INTERACTIONS", "").lower() == "true"
+)
+# Logs Danswer only model interactions like prompts, responses, messages etc.
+LOG_DANSWER_MODEL_INTERACTIONS = (
+    os.environ.get("LOG_DANSWER_MODEL_INTERACTIONS", "").lower() == "true"
 )
 # If set to `true` will enable additional logs about Vespa query performance
 # (time spent on finding the right docs + time spent fetching summaries from disk)
 LOG_VESPA_TIMING_INFORMATION = (
     os.environ.get("LOG_VESPA_TIMING_INFORMATION", "").lower() == "true"
 )
+LOG_ENDPOINT_LATENCY = os.environ.get("LOG_ENDPOINT_LATENCY", "").lower() == "true"
 # Anonymous usage telemetry
 DISABLE_TELEMETRY = os.environ.get("DISABLE_TELEMETRY", "").lower() == "true"
 
 TOKEN_BUDGET_GLOBALLY_ENABLED = (
     os.environ.get("TOKEN_BUDGET_GLOBALLY_ENABLED", "").lower() == "true"
+)
+
+# Defined custom query/answer conditions to validate the query and the LLM answer.
+# Format: list of strings
+CUSTOM_ANSWER_VALIDITY_CONDITIONS = json.loads(
+    os.environ.get("CUSTOM_ANSWER_VALIDITY_CONDITIONS", "[]")
+)
+
+
+#####
+# Enterprise Edition Configs
+#####
+# NOTE: this should only be enabled if you have purchased an enterprise license.
+# if you're interested in an enterprise license, please reach out to us at
+# founders@danswer.ai OR message Chris Weaver or Yuhong Sun in the Danswer
+# Slack community (https://join.slack.com/t/danswer/shared_invite/zt-1w76msxmd-HJHLe3KNFIAIzk_0dSOKaQ)
+ENTERPRISE_EDITION_ENABLED = (
+    os.environ.get("ENABLE_PAID_ENTERPRISE_EDITION_FEATURES", "").lower() == "true"
 )

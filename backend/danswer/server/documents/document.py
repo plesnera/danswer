@@ -9,9 +9,8 @@ from danswer.db.embedding_model import get_current_db_embedding_model
 from danswer.db.engine import get_session
 from danswer.db.models import User
 from danswer.document_index.factory import get_default_document_index
-from danswer.llm.utils import get_default_llm_token_encode
+from danswer.natural_language_processing.utils import get_default_llm_token_encode
 from danswer.prompts.prompt_utils import build_doc_context_str
-from danswer.search.models import IndexFilters
 from danswer.search.preprocessing.access_filters import build_access_filters_for_user
 from danswer.server.documents.models import ChunkInfo
 from danswer.server.documents.models import DocumentInfo
@@ -35,13 +34,11 @@ def get_document_info(
     )
 
     user_acl_filters = build_access_filters_for_user(user, db_session)
-    filters = IndexFilters(access_control_list=user_acl_filters)
-
     inference_chunks = document_index.id_based_retrieval(
         document_id=document_id,
         min_chunk_ind=None,
         max_chunk_ind=None,
-        filters=filters,
+        user_access_control_list=user_acl_filters,
     )
 
     if not inference_chunks:
@@ -83,13 +80,11 @@ def get_chunk_info(
     )
 
     user_acl_filters = build_access_filters_for_user(user, db_session)
-    filters = IndexFilters(access_control_list=user_acl_filters)
-
     inference_chunks = document_index.id_based_retrieval(
         document_id=document_id,
         min_chunk_ind=chunk_id,
         max_chunk_ind=chunk_id,
-        filters=filters,
+        user_access_control_list=user_acl_filters,
     )
 
     if not inference_chunks:

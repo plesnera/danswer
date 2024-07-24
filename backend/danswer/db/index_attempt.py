@@ -81,7 +81,6 @@ def mark_attempt_in_progress(
 ) -> None:
     index_attempt.status = IndexingStatus.IN_PROGRESS
     index_attempt.time_started = index_attempt.time_started or func.now()  # type: ignore
-    db_session.add(index_attempt)
     db_session.commit()
 
 

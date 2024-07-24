@@ -2,15 +2,40 @@ import { Header } from "@/components/header/Header";
 import { AdminSidebar } from "@/components/admin/connectors/AdminSidebar";
 import {
   NotebookIcon,
-  KeyIcon,
   UsersIcon,
   ThumbsUpIcon,
   BookmarkIcon,
-  CPUIcon,
   ZoomInIcon,
   RobotIcon,
   ConnectorIcon,
-  SlackIcon,
+  GroupsIcon,
+  DatabaseIcon,
+  KeyIcon,
+  ClipboardIcon,
+  ChatIcon,
+  SearchIcon,
+  NotebookIconSkeleton,
+  ConnectorIconSkeleton,
+  ThumbsUpIconSkeleton,
+  ToolIconSkeleton,
+  CpuIconSkeleton,
+  UsersIconSkeleton,
+  GroupsIconSkeleton,
+  KeyIconSkeleton,
+  ShieldIconSkeleton,
+  DatabaseIconSkeleton,
+  SettingsIconSkeleton,
+  PaintingIconSkeleton,
+  BookmarkIconSkeleton,
+  ZoomInIconSkeleton,
+  StarIconSkeleton,
+  SlackIconSkeleton,
+  DocumentSetIconSkeleton,
+  EmbeddingIcon,
+  EmbeddingIconSkeleton,
+  BackIcon,
+  AssistantsIcon,
+  AssistantsIconSkeleton,
 } from "@/components/icons/icons";
 import { User } from "@/lib/types";
 import {
@@ -18,14 +43,20 @@ import {
   getAuthTypeMetadataSS,
   getCurrentUserSS,
 } from "@/lib/userSS";
+import { SERVER_SIDE_ONLY__PAID_ENTERPRISE_FEATURES_ENABLED } from "@/lib/constants";
 import { redirect } from "next/navigation";
 import {
+  FiActivity,
+  FiBarChart2,
   FiCpu,
-  FiLayers,
+  FiImage,
   FiPackage,
   FiSettings,
+  FiShield,
   FiSlack,
+  FiTool,
 } from "react-icons/fi";
+import { UserDropdown } from "../UserDropdown";
 
 export async function Layout({ children }: { children: React.ReactNode }) {
   const tasks = [getAuthTypeMetadataSS(), getCurrentUserSS()];
@@ -59,11 +90,8 @@ export async function Layout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="h-screen overflow-y-hidden">
-      <div className="absolute top-0 z-50 w-full">
-        <Header user={user} />
-      </div>
-      <div className="flex h-full pt-16">
-        <div className="w-80 pt-12 pb-8 h-full border-r border-border">
+      <div className="flex h-full">
+        <div className="w-64 z-20 bg-background-100 pt-3 pb-8 h-full border-r border-border miniscroll overflow-auto">
           <AdminSidebar
             collections={[
               {
@@ -72,7 +100,7 @@ export async function Layout({ children }: { children: React.ReactNode }) {
                   {
                     name: (
                       <div className="flex">
-                        <NotebookIcon size={18} />
+                        <NotebookIconSkeleton size={18} />
                         <div className="ml-1">Existing Connectors</div>
                       </div>
                     ),
@@ -81,7 +109,7 @@ export async function Layout({ children }: { children: React.ReactNode }) {
                   {
                     name: (
                       <div className="flex">
-                        <ConnectorIcon size={18} />
+                        <ConnectorIconSkeleton size={18} />
                         <div className="ml-1.5">Add Connector</div>
                       </div>
                     ),
@@ -95,7 +123,7 @@ export async function Layout({ children }: { children: React.ReactNode }) {
                   {
                     name: (
                       <div className="flex">
-                        <BookmarkIcon size={18} />
+                        <DocumentSetIconSkeleton size={18} />
                         <div className="ml-1">Document Sets</div>
                       </div>
                     ),
@@ -104,7 +132,7 @@ export async function Layout({ children }: { children: React.ReactNode }) {
                   {
                     name: (
                       <div className="flex">
-                        <ZoomInIcon size={18} />
+                        <ZoomInIconSkeleton size={18} />
                         <div className="ml-1">Explorer</div>
                       </div>
                     ),
@@ -113,7 +141,7 @@ export async function Layout({ children }: { children: React.ReactNode }) {
                   {
                     name: (
                       <div className="flex">
-                        <ThumbsUpIcon size={18} />
+                        <ThumbsUpIconSkeleton size={18} />
                         <div className="ml-1">Feedback</div>
                       </div>
                     ),
@@ -127,7 +155,7 @@ export async function Layout({ children }: { children: React.ReactNode }) {
                   {
                     name: (
                       <div className="flex">
-                        <RobotIcon size={18} />
+                        <AssistantsIconSkeleton className="my-auto" size={18} />
                         <div className="ml-1">Assistants</div>
                       </div>
                     ),
@@ -136,11 +164,31 @@ export async function Layout({ children }: { children: React.ReactNode }) {
                   {
                     name: (
                       <div className="flex">
-                        <FiSlack size={18} />
+                        {/* <FiSlack size={18} /> */}
+                        <SlackIconSkeleton />
                         <div className="ml-1">Slack Bots</div>
                       </div>
                     ),
                     link: "/admin/bot",
+                  },
+                  {
+                    name: (
+                      <div className="flex">
+                        {/* <FiTool size={18} className="my-auto" /> */}
+                        <ToolIconSkeleton size={18} />
+                        <div className="ml-1">Tools</div>
+                      </div>
+                    ),
+                    link: "/admin/tools",
+                  },
+                  {
+                    name: (
+                      <div className="flex">
+                        <ClipboardIcon size={18} />
+                        <div className="ml-1">Standard Answers</div>
+                      </div>
+                    ),
+                    link: "/admin/standard-answer",
                   },
                 ],
               },
@@ -150,16 +198,17 @@ export async function Layout({ children }: { children: React.ReactNode }) {
                   {
                     name: (
                       <div className="flex">
-                        <FiCpu size={18} />
+                        {/* <FiCpu size={18} /> */}
+                        <CpuIconSkeleton size={18} />
                         <div className="ml-1">LLM</div>
                       </div>
                     ),
-                    link: "/admin/keys/openai",
+                    link: "/admin/models/llm",
                   },
                   {
                     name: (
                       <div className="flex">
-                        <FiPackage size={18} />
+                        <EmbeddingIconSkeleton />
                         <div className="ml-1">Embedding</div>
                       </div>
                     ),
@@ -173,33 +222,119 @@ export async function Layout({ children }: { children: React.ReactNode }) {
                   {
                     name: (
                       <div className="flex">
-                        <UsersIcon size={18} />
+                        <UsersIconSkeleton size={18} />
                         <div className="ml-1">Users</div>
                       </div>
                     ),
                     link: "/admin/users",
                   },
+                  ...(SERVER_SIDE_ONLY__PAID_ENTERPRISE_FEATURES_ENABLED
+                    ? [
+                        {
+                          name: (
+                            <div className="flex">
+                              <GroupsIconSkeleton size={18} />
+                              <div className="ml-1">Groups</div>
+                            </div>
+                          ),
+                          link: "/admin/groups",
+                        },
+                        {
+                          name: (
+                            <div className="flex">
+                              <KeyIconSkeleton size={18} />
+                              <div className="ml-1">API Keys</div>
+                            </div>
+                          ),
+                          link: "/admin/api-key",
+                        },
+                      ]
+                    : []),
+                  {
+                    name: (
+                      <div className="flex">
+                        {/* <FiShield size={18} /> */}
+                        <ShieldIconSkeleton size={18} />
+                        <div className="ml-1">Token Rate Limits</div>
+                      </div>
+                    ),
+                    link: "/admin/token-rate-limits",
+                  },
                 ],
               },
+              ...(SERVER_SIDE_ONLY__PAID_ENTERPRISE_FEATURES_ENABLED
+                ? [
+                    {
+                      name: "Performance",
+                      items: [
+                        {
+                          name: (
+                            <div className="flex">
+                              <FiActivity size={18} />
+                              <div className="ml-1">Usage Statistics</div>
+                            </div>
+                          ),
+                          link: "/admin/performance/usage",
+                        },
+                        {
+                          name: (
+                            <div className="flex">
+                              <DatabaseIconSkeleton size={18} />
+                              <div className="ml-1">Query History</div>
+                            </div>
+                          ),
+                          link: "/admin/performance/query-history",
+                        },
+                        {
+                          name: (
+                            <div className="flex">
+                              <FiBarChart2 size={18} />
+                              <div className="ml-1">Custom Analytics</div>
+                            </div>
+                          ),
+                          link: "/admin/performance/custom-analytics",
+                        },
+                      ],
+                    },
+                  ]
+                : []),
               {
                 name: "Settings",
                 items: [
                   {
                     name: (
                       <div className="flex">
-                        <FiSettings size={18} />
+                        <SettingsIconSkeleton size={18} />
                         <div className="ml-1">Workspace Settings</div>
                       </div>
                     ),
                     link: "/admin/settings",
                   },
+                  ...(SERVER_SIDE_ONLY__PAID_ENTERPRISE_FEATURES_ENABLED
+                    ? [
+                        {
+                          name: (
+                            <div className="flex">
+                              <PaintingIconSkeleton size={18} />
+                              <div className="ml-1">Whitelabeling</div>
+                            </div>
+                          ),
+                          link: "/admin/whitelabeling",
+                        },
+                      ]
+                    : []),
                 ],
               },
             ]}
           />
         </div>
-        <div className="px-12 pt-8 pb-8 h-full overflow-y-auto w-full">
-          {children}
+        <div className="pb-8 relative h-full overflow-y-auto w-full">
+          <div className="fixed bg-background left-0 gap-x-4 mb-8 px-4 py-2 w-full items-center flex justify-end">
+            <UserDropdown user={user} />
+          </div>
+          <div className="pt-12 flex overflow-y-auto h-full px-4 md:px-12">
+            {children}
+          </div>
         </div>
       </div>
     </div>

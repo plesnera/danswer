@@ -124,6 +124,19 @@ def index_doc_batch(
     """Takes different pieces of the indexing pipeline and applies it to a batch of documents
     Note that the documents should already be batched at this point so that it does not inflate the
     memory requirements"""
+    # Skip documents that have neither title nor content
+    documents_to_process = []
+    for document in documents:
+        if not document.title and not any(
+            section.text.strip() for section in document.sections
+        ):
+            logger.warning(
+                f"Skipping document with ID {document.id} as it has neither title nor content"
+            )
+        else:
+            documents_to_process.append(document)
+    documents = documents_to_process
+
     document_ids = [document.id for document in documents]
     db_docs = get_documents_by_ids(
         document_ids=document_ids,
@@ -161,59 +174,58 @@ def index_doc_batch(
     # Acquires a lock on the documents so that no other process can modify them
     # NOTE: don't need to acquire till here, since this is when the actual race condition
     # with Vespa can occur.
-    prepare_to_modify_documents(db_session=db_session, document_ids=updatable_ids)
-
-    # Attach the latest status from Postgres (source of truth for access) to each
-    # chunk. This access status will be attached to each chunk in the document index
-    # TODO: attach document sets to the chunk based on the status of Postgres as well
-    document_id_to_access_info = get_access_for_documents(
-        document_ids=updatable_ids, db_session=db_session
-    )
-    document_id_to_document_set = {
-        document_id: document_sets
-        for document_id, document_sets in fetch_document_sets_for_documents(
+    with prepare_to_modify_documents(db_session=db_session, document_ids=updatable_ids):
+        # Attach the latest status from Postgres (source of truth for access) to each
+        # chunk. This access status will be attached to each chunk in the document index
+        # TODO: attach document sets to the chunk based on the status of Postgres as well
+        document_id_to_access_info = get_access_for_documents(
             document_ids=updatable_ids, db_session=db_session
         )
-    }
-    access_aware_chunks = [
-        DocMetadataAwareIndexChunk.from_index_chunk(
-            index_chunk=chunk,
-            access=document_id_to_access_info[chunk.source_document.id],
-            document_sets=set(
-                document_id_to_document_set.get(chunk.source_document.id, [])
-            ),
-            boost=(
-                id_to_db_doc_map[chunk.source_document.id].boost
-                if chunk.source_document.id in id_to_db_doc_map
-                else DEFAULT_BOOST
-            ),
+        document_id_to_document_set = {
+            document_id: document_sets
+            for document_id, document_sets in fetch_document_sets_for_documents(
+                document_ids=updatable_ids, db_session=db_session
+            )
+        }
+        access_aware_chunks = [
+            DocMetadataAwareIndexChunk.from_index_chunk(
+                index_chunk=chunk,
+                access=document_id_to_access_info[chunk.source_document.id],
+                document_sets=set(
+                    document_id_to_document_set.get(chunk.source_document.id, [])
+                ),
+                boost=(
+                    id_to_db_doc_map[chunk.source_document.id].boost
+                    if chunk.source_document.id in id_to_db_doc_map
+                    else DEFAULT_BOOST
+                ),
+            )
+            for chunk in chunks_with_embeddings
+        ]
+
+        logger.debug(
+            f"Indexing the following chunks: {[chunk.to_short_descriptor() for chunk in chunks]}"
         )
-        for chunk in chunks_with_embeddings
-    ]
+        # A document will not be spread across different batches, so all the
+        # documents with chunks in this set, are fully represented by the chunks
+        # in this set
+        insertion_records = document_index.index(chunks=access_aware_chunks)
 
-    logger.debug(
-        f"Indexing the following chunks: {[chunk.to_short_descriptor() for chunk in chunks]}"
-    )
-    # A document will not be spread across different batches, so all the
-    # documents with chunks in this set, are fully represented by the chunks
-    # in this set
-    insertion_records = document_index.index(chunks=access_aware_chunks)
+        successful_doc_ids = [record.document_id for record in insertion_records]
+        successful_docs = [
+            doc for doc in updatable_docs if doc.id in successful_doc_ids
+        ]
 
-    successful_doc_ids = [record.document_id for record in insertion_records]
-    successful_docs = [doc for doc in updatable_docs if doc.id in successful_doc_ids]
+        # Update the time of latest version of the doc successfully indexed
+        ids_to_new_updated_at = {}
+        for doc in successful_docs:
+            if doc.doc_updated_at is None:
+                continue
+            ids_to_new_updated_at[doc.id] = doc.doc_updated_at
 
-    # Update the time of latest version of the doc successfully indexed
-    ids_to_new_updated_at = {}
-    for doc in successful_docs:
-        if doc.doc_updated_at is None:
-            continue
-        ids_to_new_updated_at[doc.id] = doc.doc_updated_at
-
-    update_docs_updated_at(
-        ids_to_new_updated_at=ids_to_new_updated_at, db_session=db_session
-    )
-
-    db_session.commit()
+        update_docs_updated_at(
+            ids_to_new_updated_at=ids_to_new_updated_at, db_session=db_session
+        )
 
     return len([r for r in insertion_records if r.already_existed is False]), len(
         chunks

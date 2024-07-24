@@ -1,6 +1,12 @@
+import io
+import uuid
+
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Request
+from fastapi import Response
+from fastapi import UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -9,6 +15,7 @@ from danswer.auth.users import current_user
 from danswer.chat.chat_utils import create_chat_chain
 from danswer.chat.process_message import stream_chat_message
 from danswer.configs.app_configs import WEB_DOMAIN
+from danswer.configs.constants import FileOrigin
 from danswer.configs.constants import MessageType
 from danswer.db.chat import create_chat_session
 from danswer.db.chat import create_new_chat_message
@@ -18,7 +25,6 @@ from danswer.db.chat import get_chat_messages_by_session
 from danswer.db.chat import get_chat_session_by_id
 from danswer.db.chat import get_chat_sessions_by_user
 from danswer.db.chat import get_or_create_root_message
-from danswer.db.chat import get_persona_by_id
 from danswer.db.chat import set_as_latest_chat_message
 from danswer.db.chat import translate_db_message_to_chat_message_detail
 from danswer.db.chat import update_chat_session
@@ -26,12 +32,20 @@ from danswer.db.engine import get_session
 from danswer.db.feedback import create_chat_message_feedback
 from danswer.db.feedback import create_doc_retrieval_feedback
 from danswer.db.models import User
+from danswer.db.persona import get_persona_by_id
 from danswer.document_index.document_index_utils import get_both_index_names
 from danswer.document_index.factory import get_default_document_index
+from danswer.file_processing.extract_file_text import extract_file_text
+from danswer.file_store.file_store import get_default_file_store
+from danswer.file_store.models import ChatFileType
+from danswer.file_store.models import FileDescriptor
 from danswer.llm.answering.prompts.citations_prompt import (
     compute_max_document_tokens_for_persona,
 )
-from danswer.llm.utils import get_default_llm_tokenizer
+from danswer.llm.exceptions import GenAIDisabledException
+from danswer.llm.factory import get_default_llms
+from danswer.llm.headers import get_litellm_additional_request_headers
+from danswer.natural_language_processing.utils import get_default_llm_tokenizer
 from danswer.secondary_llm_flows.chat_session_naming import (
     get_renamed_conversation_name,
 )
@@ -49,6 +63,8 @@ from danswer.server.query_and_chat.models import LLMOverride
 from danswer.server.query_and_chat.models import PromptOverride
 from danswer.server.query_and_chat.models import RenameChatSessionResponse
 from danswer.server.query_and_chat.models import SearchFeedbackRequest
+from danswer.server.query_and_chat.models import UpdateChatSessionThreadRequest
+from danswer.server.query_and_chat.token_limit import check_token_rate_limits
 from danswer.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -63,9 +79,13 @@ def get_user_chat_sessions(
 ) -> ChatSessionsResponse:
     user_id = user.id if user is not None else None
 
-    chat_sessions = get_chat_sessions_by_user(
-        user_id=user_id, deleted=False, db_session=db_session
-    )
+    try:
+        chat_sessions = get_chat_sessions_by_user(
+            user_id=user_id, deleted=False, db_session=db_session
+        )
+
+    except ValueError:
+        raise ValueError("Chat session does not exist or has been deleted")
 
     return ChatSessionsResponse(
         sessions=[
@@ -75,10 +95,29 @@ def get_user_chat_sessions(
                 persona_id=chat.persona_id,
                 time_created=chat.time_created.isoformat(),
                 shared_status=chat.shared_status,
+                folder_id=chat.folder_id,
+                current_alternate_model=chat.current_alternate_model,
             )
             for chat in chat_sessions
         ]
     )
+
+
+@router.put("/update-chat-session-model")
+def update_chat_session_model(
+    update_thread_req: UpdateChatSessionThreadRequest,
+    user: User | None = Depends(current_user),
+    db_session: Session = Depends(get_session),
+) -> None:
+    chat_session = get_chat_session_by_id(
+        chat_session_id=update_thread_req.chat_session_id,
+        user_id=user.id if user is not None else None,
+        db_session=db_session,
+    )
+    chat_session.current_alternate_model = update_thread_req.new_alternate_model
+
+    db_session.add(chat_session)
+    db_session.commit()
 
 
 @router.get("/get-chat-session/{session_id}")
@@ -114,6 +153,8 @@ def get_chat_session(
         # we already did a permission check above with the call to
         # `get_chat_session_by_id`, so we can skip it here
         skip_permission_check=True,
+        # we need the tool call objs anyways, so just fetch them in a single call
+        prefetch_tool_calls=True,
     )
 
     return ChatSessionDetailResponse(
@@ -121,6 +162,7 @@ def get_chat_session(
         description=chat_session.description,
         persona_id=chat_session.persona_id,
         persona_name=chat_session.persona.name,
+        current_alternate_model=chat_session.current_alternate_model,
         messages=[
             translate_db_message_to_chat_message_detail(
                 msg, remove_doc_content=is_shared  # if shared, don't leak doc content
@@ -157,6 +199,7 @@ def create_new_chat_session(
 @router.put("/rename-chat-session")
 def rename_chat_session(
     rename_req: ChatRenameRequest,
+    request: Request,
     user: User | None = Depends(current_user),
     db_session: Session = Depends(get_session),
 ) -> RenameChatSessionResponse:
@@ -180,7 +223,16 @@ def rename_chat_session(
     )
     full_history = history_msgs + [final_msg]
 
-    new_name = get_renamed_conversation_name(full_history=full_history)
+    try:
+        llm, _ = get_default_llms(
+            additional_headers=get_litellm_additional_request_headers(request.headers)
+        )
+    except GenAIDisabledException:
+        # This may be longer than what the LLM tends to produce but is the most
+        # clear thing we can do
+        return RenameChatSessionResponse(new_name=full_history[0].message)
+
+    new_name = get_renamed_conversation_name(full_history=full_history, llm=llm)
 
     update_chat_session(
         db_session=db_session,
@@ -222,7 +274,9 @@ def delete_chat_session_by_id(
 @router.post("/send-message")
 def handle_new_chat_message(
     chat_message_req: CreateChatMessageRequest,
+    request: Request,
     user: User | None = Depends(current_user),
+    _: None = Depends(check_token_rate_limits),
 ) -> StreamingResponse:
     """This endpoint is both used for all the following purposes:
     - Sending a new message in the session
@@ -232,7 +286,7 @@ def handle_new_chat_message(
 
     To avoid extra overhead/latency, this assumes (and checks) that previous messages on the path
     have already been set as latest"""
-    logger.info(f"Received new chat message: {chat_message_req.message}")
+    logger.debug(f"Received new chat message: {chat_message_req.message}")
 
     if (
         not chat_message_req.message
@@ -245,8 +299,10 @@ def handle_new_chat_message(
         new_msg_req=chat_message_req,
         user=user,
         use_existing_user_message=chat_message_req.use_existing_user_message,
+        litellm_additional_headers=get_litellm_additional_request_headers(
+            request.headers
+        ),
     )
-
     return StreamingResponse(packets, media_type="application/json")
 
 
@@ -282,6 +338,7 @@ def create_chat_feedback(
     create_chat_message_feedback(
         is_positive=feedback.is_positive,
         feedback_text=feedback.feedback_text,
+        predefined_feedback=feedback.predefined_feedback,
         chat_message_id=feedback.chat_message_id,
         user_id=user_id,
         db_session=db_session,
@@ -329,6 +386,7 @@ def get_max_document_tokens(
             persona_id=persona_id,
             user=user,
             db_session=db_session,
+            is_for_edit=False,
         )
     except ValueError:
         raise HTTPException(status_code=404, detail="Persona not found")
@@ -402,5 +460,125 @@ def seed_chat(
         )
 
     return ChatSeedResponse(
-        redirect_url=f"{WEB_DOMAIN}/chat?chatId={new_chat_session.id}"
+        redirect_url=f"{WEB_DOMAIN}/chat?chatId={new_chat_session.id}&seeded=true"
     )
+
+
+"""File upload"""
+
+
+@router.post("/file")
+def upload_files_for_chat(
+    files: list[UploadFile],
+    db_session: Session = Depends(get_session),
+    _: User | None = Depends(current_user),
+) -> dict[str, list[FileDescriptor]]:
+    image_content_types = {"image/jpeg", "image/png", "image/webp"}
+    text_content_types = {
+        "text/plain",
+        "text/csv",
+        "text/markdown",
+        "text/x-markdown",
+        "text/x-config",
+        "text/tab-separated-values",
+        "application/json",
+        "application/xml",
+        "text/xml",
+        "application/x-yaml",
+    }
+    document_content_types = {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "message/rfc822",
+        "application/epub+zip",
+    }
+
+    allowed_content_types = image_content_types.union(text_content_types).union(
+        document_content_types
+    )
+
+    for file in files:
+        if file.content_type not in allowed_content_types:
+            if file.content_type in image_content_types:
+                error_detail = "Unsupported image file type. Supported image types include .jpg, .jpeg, .png, .webp."
+            elif file.content_type in text_content_types:
+                error_detail = "Unsupported text file type. Supported text types include .txt, .csv, .md, .mdx, .conf, "
+                ".log, .tsv."
+            else:
+                error_detail = (
+                    "Unsupported document file type. Supported document types include .pdf, .docx, .pptx, .xlsx, "
+                    ".json, .xml, .yml, .yaml, .eml, .epub."
+                )
+            raise HTTPException(status_code=400, detail=error_detail)
+
+        if (
+            file.content_type in image_content_types
+            and file.size
+            and file.size > 20 * 1024 * 1024
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="File size must be less than 20MB",
+            )
+
+    file_store = get_default_file_store(db_session)
+
+    file_info: list[tuple[str, str | None, ChatFileType]] = []
+    for file in files:
+        if file.content_type in image_content_types:
+            file_type = ChatFileType.IMAGE
+        elif file.content_type in document_content_types:
+            file_type = ChatFileType.DOC
+        else:
+            file_type = ChatFileType.PLAIN_TEXT
+
+        # store the raw file
+        file_id = str(uuid.uuid4())
+        file_store.save_file(
+            file_name=file_id,
+            content=file.file,
+            display_name=file.filename,
+            file_origin=FileOrigin.CHAT_UPLOAD,
+            file_type=file.content_type or file_type.value,
+        )
+
+        # if the file is a doc, extract text and store that so we don't need
+        # to re-extract it every time we send a message
+        if file_type == ChatFileType.DOC:
+            extracted_text = extract_file_text(file_name=file.filename, file=file.file)
+            text_file_id = str(uuid.uuid4())
+            file_store.save_file(
+                file_name=text_file_id,
+                content=io.BytesIO(extracted_text.encode()),
+                display_name=file.filename,
+                file_origin=FileOrigin.CHAT_UPLOAD,
+                file_type="text/plain",
+            )
+            # for DOC type, just return this for the FileDescriptor
+            # as we would always use this as the ID to attach to the
+            # message
+            file_info.append((text_file_id, file.filename, ChatFileType.PLAIN_TEXT))
+        else:
+            file_info.append((file_id, file.filename, file_type))
+
+    return {
+        "files": [
+            {"id": file_id, "type": file_type, "name": file_name}
+            for file_id, file_name, file_type in file_info
+        ]
+    }
+
+
+@router.get("/file/{file_id}")
+def fetch_chat_file(
+    file_id: str,
+    db_session: Session = Depends(get_session),
+    _: User | None = Depends(current_user),
+) -> Response:
+    file_store = get_default_file_store(db_session)
+    file_io = file_store.read_file(file_id, mode="b")
+    # NOTE: specifying "image/jpeg" here, but it still works for pngs
+    # TODO: do this properly
+    return Response(content=file_io.read(), media_type="image/jpeg")

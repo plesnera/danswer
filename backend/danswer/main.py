@@ -27,15 +27,13 @@ from danswer.configs.app_configs import APP_PORT
 from danswer.configs.app_configs import AUTH_TYPE
 from danswer.configs.app_configs import DISABLE_GENERATIVE_AI
 from danswer.configs.app_configs import DISABLE_INDEX_UPDATE_ON_SWAP
+from danswer.configs.app_configs import LOG_ENDPOINT_LATENCY
 from danswer.configs.app_configs import OAUTH_CLIENT_ID
 from danswer.configs.app_configs import OAUTH_CLIENT_SECRET
-from danswer.configs.app_configs import SECRET
+from danswer.configs.app_configs import USER_AUTH_SECRET
 from danswer.configs.app_configs import WEB_DOMAIN
 from danswer.configs.chat_configs import MULTILINGUAL_QUERY_EXPANSION
 from danswer.configs.constants import AuthType
-from danswer.configs.model_configs import GEN_AI_API_ENDPOINT
-from danswer.configs.model_configs import GEN_AI_MODEL_PROVIDER
-from danswer.db.chat import delete_old_default_personas
 from danswer.db.connector import create_initial_default_connector
 from danswer.db.connector_credential_pair import associate_default_cc_pair
 from danswer.db.connector_credential_pair import get_connector_credential_pairs
@@ -44,32 +42,41 @@ from danswer.db.credentials import create_initial_public_credential
 from danswer.db.embedding_model import get_current_db_embedding_model
 from danswer.db.embedding_model import get_secondary_db_embedding_model
 from danswer.db.engine import get_sqlalchemy_engine
+from danswer.db.engine import warm_up_connections
 from danswer.db.index_attempt import cancel_indexing_attempts_past_model
 from danswer.db.index_attempt import expire_index_attempts
+from danswer.db.persona import delete_old_default_personas
+from danswer.db.standard_answer import create_initial_default_standard_answer_category
 from danswer.db.swap_index import check_index_swap
 from danswer.document_index.factory import get_default_document_index
-from danswer.dynamic_configs.port_configs import port_filesystem_to_postgres
-from danswer.llm.factory import get_default_llm
-from danswer.llm.utils import get_default_llm_version
+from danswer.llm.llm_initialization import load_llm_providers
+from danswer.natural_language_processing.search_nlp_models import warm_up_encoders
 from danswer.search.retrieval.search_runner import download_nltk_data
-from danswer.search.search_nlp_models import warm_up_encoders
 from danswer.server.auth_check import check_router_auth
-from danswer.server.danswer_api.ingestion import get_danswer_api_key
 from danswer.server.danswer_api.ingestion import router as danswer_api_router
 from danswer.server.documents.cc_pair import router as cc_pair_router
 from danswer.server.documents.connector import router as connector_router
 from danswer.server.documents.credential import router as credential_router
 from danswer.server.documents.document import router as document_router
 from danswer.server.features.document_set.api import router as document_set_router
+from danswer.server.features.folder.api import router as folder_router
 from danswer.server.features.persona.api import admin_router as admin_persona_router
 from danswer.server.features.persona.api import basic_router as persona_router
 from danswer.server.features.prompt.api import basic_router as prompt_router
+from danswer.server.features.tool.api import admin_router as admin_tool_router
+from danswer.server.features.tool.api import router as tool_router
 from danswer.server.gpts.api import router as gpts_router
 from danswer.server.manage.administrative import router as admin_router
+from danswer.server.manage.embedding.api import admin_router as embedding_admin_router
+from danswer.server.manage.embedding.api import basic_router as embedding_router
 from danswer.server.manage.get_state import router as state_router
+from danswer.server.manage.llm.api import admin_router as llm_admin_router
+from danswer.server.manage.llm.api import basic_router as llm_router
 from danswer.server.manage.secondary_index import router as secondary_index_router
 from danswer.server.manage.slack_bot import router as slack_bot_management_router
+from danswer.server.manage.standard_answer import router as standard_answer_router
 from danswer.server.manage.users import router as user_router
+from danswer.server.middleware.latency_logging import add_latency_logging_middleware
 from danswer.server.query_and_chat.chat_backend import router as chat_router
 from danswer.server.query_and_chat.query_backend import (
     admin_router as admin_query_router,
@@ -77,10 +84,18 @@ from danswer.server.query_and_chat.query_backend import (
 from danswer.server.query_and_chat.query_backend import basic_router as query_router
 from danswer.server.settings.api import admin_router as settings_admin_router
 from danswer.server.settings.api import basic_router as settings_router
+from danswer.server.token_rate_limits.api import (
+    router as token_rate_limit_settings_router,
+)
+from danswer.tools.built_in_tools import auto_add_search_tool_to_personas
+from danswer.tools.built_in_tools import load_builtin_tools
+from danswer.tools.built_in_tools import refresh_built_in_tools_cache
 from danswer.utils.logger import setup_logger
 from danswer.utils.telemetry import optional_telemetry
 from danswer.utils.telemetry import RecordType
 from danswer.utils.variable_functionality import fetch_versioned_implementation
+from danswer.utils.variable_functionality import global_version
+from danswer.utils.variable_functionality import set_is_ee_based_on_env_variable
 from shared_configs.configs import ENABLE_RERANKING_REAL_TIME_FLOW
 from shared_configs.configs import MODEL_SERVER_HOST
 from shared_configs.configs import MODEL_SERVER_PORT
@@ -147,38 +162,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # Will throw exception if an issue is found
     verify_auth()
 
-    # Danswer APIs key
-    api_key = get_danswer_api_key()
-    logger.info(f"Danswer API Key: {api_key}")
-
     if OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET:
         logger.info("Both OAuth Client ID and Secret are configured.")
 
     if DISABLE_GENERATIVE_AI:
         logger.info("Generative AI Q&A disabled")
-    else:
-        logger.info(f"Using LLM Provider: {GEN_AI_MODEL_PROVIDER}")
-        base, fast = get_default_llm_version()
-        logger.info(f"Using LLM Model Version: {base}")
-        if base != fast:
-            logger.info(f"Using Fast LLM Model Version: {fast}")
-        if GEN_AI_API_ENDPOINT:
-            logger.info(f"Using LLM Endpoint: {GEN_AI_API_ENDPOINT}")
-
-        # Any additional model configs logged here
-        get_default_llm().log_model_configs()
 
     if MULTILINGUAL_QUERY_EXPANSION:
         logger.info(
             f"Using multilingual flow with languages: {MULTILINGUAL_QUERY_EXPANSION}"
         )
 
-    try:
-        port_filesystem_to_postgres()
-    except Exception:
-        logger.debug(
-            "Skipping port of persistent volumes. Maybe these have already been removed?"
-        )
+    # fill up Postgres connection pools
+    await warm_up_connections()
 
     with Session(engine) as db_session:
         check_index_swap(db_session=db_session)
@@ -215,9 +211,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         create_initial_default_connector(db_session)
         associate_default_cc_pair(db_session)
 
+        logger.info("Verifying default standard answer category exists.")
+        create_initial_default_standard_answer_category(db_session)
+
+        logger.info("Loading LLM providers from env variables")
+        load_llm_providers(db_session)
+
         logger.info("Loading default Prompts and Personas")
         delete_old_default_personas(db_session)
         load_chat_yamls()
+
+        logger.info("Loading built-in tools")
+        load_builtin_tools(db_session)
+        refresh_built_in_tools_cache(db_session)
+        auto_add_search_tool_to_personas(db_session)
 
         logger.info("Verifying Document Index(s) is/are available.")
         document_index = get_default_document_index(
@@ -242,15 +249,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
                 time.sleep(wait_time)
 
     logger.info(f"Model Server: http://{MODEL_SERVER_HOST}:{MODEL_SERVER_PORT}")
-    warm_up_encoders(
-        model_name=db_embedding_model.model_name,
-        normalize=db_embedding_model.normalize,
-        model_server_host=MODEL_SERVER_HOST,
-        model_server_port=MODEL_SERVER_PORT,
-    )
+    if db_embedding_model.cloud_provider_id is None:
+        warm_up_encoders(
+            model_name=db_embedding_model.model_name,
+            normalize=db_embedding_model.normalize,
+            model_server_host=MODEL_SERVER_HOST,
+            model_server_port=MODEL_SERVER_PORT,
+        )
 
     optional_telemetry(record_type=RecordType.VERSION, data={"version": __version__})
-
     yield
 
 
@@ -268,19 +275,30 @@ def get_application() -> FastAPI:
     include_router_with_global_prefix_prepended(application, connector_router)
     include_router_with_global_prefix_prepended(application, credential_router)
     include_router_with_global_prefix_prepended(application, cc_pair_router)
+    include_router_with_global_prefix_prepended(application, folder_router)
     include_router_with_global_prefix_prepended(application, document_set_router)
     include_router_with_global_prefix_prepended(application, secondary_index_router)
     include_router_with_global_prefix_prepended(
         application, slack_bot_management_router
     )
+    include_router_with_global_prefix_prepended(application, standard_answer_router)
     include_router_with_global_prefix_prepended(application, persona_router)
     include_router_with_global_prefix_prepended(application, admin_persona_router)
     include_router_with_global_prefix_prepended(application, prompt_router)
+    include_router_with_global_prefix_prepended(application, tool_router)
+    include_router_with_global_prefix_prepended(application, admin_tool_router)
     include_router_with_global_prefix_prepended(application, state_router)
     include_router_with_global_prefix_prepended(application, danswer_api_router)
     include_router_with_global_prefix_prepended(application, gpts_router)
     include_router_with_global_prefix_prepended(application, settings_router)
     include_router_with_global_prefix_prepended(application, settings_admin_router)
+    include_router_with_global_prefix_prepended(application, llm_admin_router)
+    include_router_with_global_prefix_prepended(application, llm_router)
+    include_router_with_global_prefix_prepended(application, embedding_admin_router)
+    include_router_with_global_prefix_prepended(application, embedding_router)
+    include_router_with_global_prefix_prepended(
+        application, token_rate_limit_settings_router
+    )
 
     if AUTH_TYPE == AuthType.DISABLED:
         # Server logs this during auth setup verification step
@@ -325,7 +343,7 @@ def get_application() -> FastAPI:
             fastapi_users.get_oauth_router(
                 oauth_client,
                 auth_backend,
-                SECRET,
+                USER_AUTH_SECRET,
                 associate_by_email=True,
                 is_verified_by_default=True,
                 # Points the user back to the login page
@@ -355,6 +373,8 @@ def get_application() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    if LOG_ENDPOINT_LATENCY:
+        add_latency_logging_middleware(application, logger)
 
     # Ensure all routes have auth enabled or are explicitly marked as public
     check_router_auth(application)
@@ -362,11 +382,18 @@ def get_application() -> FastAPI:
     return application
 
 
-app = get_application()
+# NOTE: needs to be outside of the `if __name__ == "__main__"` block so that the
+# app is exportable
+set_is_ee_based_on_env_variable()
+app = fetch_versioned_implementation(module="danswer.main", attribute="get_application")
 
 
 if __name__ == "__main__":
     logger.info(
         f"Starting Danswer Backend version {__version__} on http://{APP_HOST}:{str(APP_PORT)}/"
     )
+
+    if global_version.get_is_ee_version():
+        logger.info("Running Enterprise Edition")
+
     uvicorn.run(app, host=APP_HOST, port=APP_PORT)

@@ -14,7 +14,9 @@ from sqlalchemy.orm import Session
 from danswer.auth.users import current_admin_user
 from danswer.auth.users import current_user
 from danswer.background.celery.celery_utils import get_deletion_status
+from danswer.configs.app_configs import ENABLED_CONNECTOR_TYPES
 from danswer.configs.constants import DocumentSource
+from danswer.configs.constants import FileOrigin
 from danswer.connectors.gmail.connector_auth import delete_gmail_service_account_key
 from danswer.connectors.gmail.connector_auth import delete_google_app_gmail_cred
 from danswer.connectors.gmail.connector_auth import get_gmail_auth_url
@@ -58,7 +60,6 @@ from danswer.db.deletion_attempt import check_deletion_attempt_is_allowed
 from danswer.db.document import get_document_cnts_for_cc_pairs
 from danswer.db.embedding_model import get_current_db_embedding_model
 from danswer.db.engine import get_session
-from danswer.db.file_store import get_default_file_store
 from danswer.db.index_attempt import cancel_indexing_attempts_for_connector
 from danswer.db.index_attempt import cancel_indexing_attempts_past_model
 from danswer.db.index_attempt import create_index_attempt
@@ -66,6 +67,7 @@ from danswer.db.index_attempt import get_index_attempts_for_cc_pair
 from danswer.db.index_attempt import get_latest_index_attempts
 from danswer.db.models import User
 from danswer.dynamic_configs.interface import ConfigNotFoundError
+from danswer.file_store.file_store import get_default_file_store
 from danswer.server.documents.models import AuthStatus
 from danswer.server.documents.models import AuthUrl
 from danswer.server.documents.models import ConnectorBase
@@ -350,7 +352,13 @@ def upload_files(
         for file in files:
             file_path = os.path.join(str(uuid.uuid4()), cast(str, file.filename))
             deduped_file_paths.append(file_path)
-            file_store.save_file(file_name=file_path, content=file.file)
+            file_store.save_file(
+                file_name=file_path,
+                content=file.file,
+                display_name=file.filename,
+                file_origin=FileOrigin.CONNECTOR,
+                file_type=file.content_type or "text/plain",
+            )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return FileUploadResponse(file_paths=deduped_file_paths)
@@ -410,7 +418,9 @@ def get_connector_indexing_status(
                 credential=CredentialSnapshot.from_credential_db_model(credential),
                 public_doc=cc_pair.is_public,
                 owner=credential.user.email if credential.user else "",
-                last_status=cc_pair.last_attempt_status,
+                last_status=latest_index_attempt.status
+                if latest_index_attempt
+                else None,
                 last_success=cc_pair.last_successful_index_time,
                 docs_indexed=cc_pair_to_document_cnt.get(
                     (connector.id, credential.id), 0
@@ -429,22 +439,43 @@ def get_connector_indexing_status(
                     db_session=db_session,
                 ),
                 is_deletable=check_deletion_attempt_is_allowed(
-                    connector_credential_pair=cc_pair
-                ),
+                    connector_credential_pair=cc_pair,
+                    db_session=db_session,
+                    # allow scheduled indexing attempts here, since on deletion request we will cancel them
+                    allow_scheduled=True,
+                )
+                is None,
             )
         )
 
     return indexing_statuses
 
 
+def _validate_connector_allowed(source: DocumentSource) -> None:
+    valid_connectors = [
+        x for x in ENABLED_CONNECTOR_TYPES.replace("_", "").split(",") if x
+    ]
+    if not valid_connectors:
+        return
+    for connector_type in valid_connectors:
+        if source.value.lower().replace("_", "") == connector_type:
+            return
+
+    raise ValueError(
+        "This connector type has been disabled by your system admin. "
+        "Please contact them to get it enabled if you wish to use it."
+    )
+
+
 @router.post("/admin/connector")
 def create_connector_from_model(
-    connector_info: ConnectorBase,
+    connector_data: ConnectorBase,
     _: User = Depends(current_admin_user),
     db_session: Session = Depends(get_session),
 ) -> ObjectCreationIdResponse:
     try:
-        return create_connector(connector_info, db_session)
+        _validate_connector_allowed(connector_data.source)
+        return create_connector(connector_data, db_session)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -456,6 +487,11 @@ def update_connector_from_model(
     _: User = Depends(current_admin_user),
     db_session: Session = Depends(get_session),
 ) -> ConnectorSnapshot | StatusResponse[int]:
+    try:
+        _validate_connector_allowed(connector_data.source)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     updated_connector = update_connector(connector_id, connector_data, db_session)
     if updated_connector is None:
         raise HTTPException(
@@ -475,6 +511,7 @@ def update_connector_from_model(
         input_type=updated_connector.input_type,
         connector_specific_config=updated_connector.connector_specific_config,
         refresh_freq=updated_connector.refresh_freq,
+        prune_freq=updated_connector.prune_freq,
         credential_ids=[
             association.credential.id for association in updated_connector.credentials
         ],
@@ -690,6 +727,7 @@ def get_connector_by_id(
         input_type=connector.input_type,
         connector_specific_config=connector.connector_specific_config,
         refresh_freq=connector.refresh_freq,
+        prune_freq=connector.prune_freq,
         credential_ids=[
             association.credential.id for association in connector.credentials
         ],

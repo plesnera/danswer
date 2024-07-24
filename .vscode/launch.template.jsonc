@@ -12,16 +12,46 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Web Server",
+            "type": "node",
+            "request": "launch",
+            "cwd": "${workspaceRoot}/web",
+            "runtimeExecutable": "npm",
+            "envFile": "${workspaceFolder}/.env",
+            "runtimeArgs": [
+                "run", "dev"
+            ],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Model Server",
+            "type": "python",
+            "request": "launch",
+            "module": "uvicorn",
+            "cwd": "${workspaceFolder}/backend",
+            "envFile": "${workspaceFolder}/.env",
+            "env": {
+                "LOG_LEVEL": "DEBUG",
+                "PYTHONUNBUFFERED": "1"
+            },
+            "args": [
+                "model_server.main:app",
+                "--reload",
+                "--port",
+                "9000"
+            ]
+        },
+        {
             "name": "API Server",
             "type": "python",
             "request": "launch",
             "module": "uvicorn",
             "cwd": "${workspaceFolder}/backend",
+            "envFile": "${workspaceFolder}/.env",
             "env": {
+                "LOG_DANSWER_MODEL_INTERACTIONS": "True",
                 "LOG_LEVEL": "DEBUG",
-                "DISABLE_AUTH": "True",
-                "TYPESENSE_API_KEY": "typesense_api_key",
-                "DYNAMIC_CONFIG_DIR_PATH": "./dynamic_config_storage"
+                "PYTHONUNBUFFERED": "1"
             },
             "args": [
                 "danswer.main:app",
@@ -31,52 +61,69 @@
             ]
         },
         {
-            "name": "Indexer",
+            "name": "Indexing",
             "type": "python",
             "request": "launch",
             "program": "danswer/background/update.py",
             "cwd": "${workspaceFolder}/backend",
+            "envFile": "${workspaceFolder}/.env",
             "env": {
+                "ENABLE_MINI_CHUNK": "false",
                 "LOG_LEVEL": "DEBUG",
-                "PYTHONPATH": ".",
-                "TYPESENSE_API_KEY": "typesense_api_key",
-                "DYNAMIC_CONFIG_DIR_PATH": "./dynamic_config_storage"
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONPATH": "."
             }
         },
+        // Celery and all async jobs, usually would include indexing as well but this is handled separately above for dev
         {
-            "name": "Temp File Deletion",
+            "name": "Background Jobs",
             "type": "python",
             "request": "launch",
-            "program": "danswer/background/file_deletion.py",
+            "program": "scripts/dev_run_background_jobs.py",
             "cwd": "${workspaceFolder}/backend",
+            "envFile": "${workspaceFolder}/.env",
             "env": {
+                "LOG_DANSWER_MODEL_INTERACTIONS": "True",
                 "LOG_LEVEL": "DEBUG",
-                "PYTHONPATH": "${workspaceFolder}/backend"
-            }
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONPATH": "."
+            },
+            "args": [
+                "--no-indexing"
+            ]
         },
         // For the listner to access the Slack API,
         // DANSWER_BOT_SLACK_APP_TOKEN & DANSWER_BOT_SLACK_BOT_TOKEN need to be set in .env file located in the root of the project
         {
-            "name": "Slack Bot Listener",
+            "name": "Slack Bot",
             "type": "python",
             "request": "launch",
-            "program": "danswer/listeners/slack_listener.py",
+            "program": "danswer/danswerbot/slack/listener.py",
             "cwd": "${workspaceFolder}/backend",
             "envFile": "${workspaceFolder}/.env",
             "env": {
-                "LOG_LEVEL": "DEBUG"
+                "LOG_LEVEL": "DEBUG",
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONPATH": "."
             }
         },
         {
-            "name": "Web Server",
-            "type": "node",
+            "name": "Pytest",
+            "type": "python",
             "request": "launch",
-            "cwd": "${workspaceRoot}/web",
-            "runtimeExecutable": "npm",
-            "runtimeArgs": [
-                "run", "dev"
-            ],
-            "console": "integratedTerminal"
+            "module": "pytest",
+            "cwd": "${workspaceFolder}/backend",
+            "envFile": "${workspaceFolder}/.env",
+            "env": {
+                "LOG_LEVEL": "DEBUG",
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONPATH": "."
+            },
+            "args": [
+                "-v"
+                // Specify a sepcific module/test to run or provide nothing to run all tests
+                //"tests/unit/danswer/llm/answering/test_prune_and_merge.py"
+            ]
         }
     ]
 }

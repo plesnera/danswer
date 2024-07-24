@@ -2,6 +2,17 @@ import { Persona } from "@/app/admin/assistants/interfaces";
 import { CCPairBasicInfo, DocumentSet, User } from "../types";
 import { getCurrentUserSS } from "../userSS";
 import { fetchSS } from "../utilsSS";
+import { FullLLMProvider } from "@/app/admin/models/llm/interfaces";
+import { ToolSnapshot } from "../tools/interfaces";
+import { fetchToolsSS } from "../tools/fetchTools";
+import { IconManifestType } from "react-icons/lib";
+import {
+  OpenAIIcon,
+  AnthropicIcon,
+  AWSIcon,
+  AzureIcon,
+  OpenSourceIcon,
+} from "@/components/icons/icons";
 
 export async function fetchAssistantEditorInfoSS(
   personaId?: number | string
@@ -10,10 +21,10 @@ export async function fetchAssistantEditorInfoSS(
       {
         ccPairs: CCPairBasicInfo[];
         documentSets: DocumentSet[];
-        llmOverrideOptions: string[];
-        defaultLLM: string;
+        llmProviders: FullLLMProvider[];
         user: User | null;
         existingPersona: Persona | null;
+        tools: ToolSnapshot[];
       },
       null,
     ]
@@ -22,11 +33,11 @@ export async function fetchAssistantEditorInfoSS(
   const tasks = [
     fetchSS("/manage/indexing-status"),
     fetchSS("/manage/document-set"),
-    fetchSS("/persona/utils/list-available-models"),
-    fetchSS("/persona/utils/default-model"),
+    fetchSS("/llm/provider"),
     // duplicate fetch, but shouldn't be too big of a deal
     // this page is not a high traffic page
     getCurrentUserSS(),
+    fetchToolsSS(),
   ];
   if (personaId) {
     tasks.push(fetchSS(`/persona/${personaId}`));
@@ -37,16 +48,16 @@ export async function fetchAssistantEditorInfoSS(
   const [
     ccPairsInfoResponse,
     documentSetsResponse,
-    llmOverridesResponse,
-    defaultLLMResponse,
+    llmProvidersResponse,
     user,
+    toolsResponse,
     personaResponse,
   ] = (await Promise.all(tasks)) as [
     Response,
     Response,
     Response,
-    Response,
     User | null,
+    ToolSnapshot[] | null,
     Response | null,
   ];
 
@@ -66,25 +77,37 @@ export async function fetchAssistantEditorInfoSS(
   }
   const documentSets = (await documentSetsResponse.json()) as DocumentSet[];
 
-  if (!llmOverridesResponse.ok) {
-    return [
-      null,
-      `Failed to fetch LLM override options - ${await llmOverridesResponse.text()}`,
-    ];
+  if (!toolsResponse) {
+    return [null, `Failed to fetch tools`];
   }
-  const llmOverrideOptions = (await llmOverridesResponse.json()) as string[];
 
-  if (!defaultLLMResponse.ok) {
+  if (!llmProvidersResponse.ok) {
     return [
       null,
-      `Failed to fetch default LLM - ${await defaultLLMResponse.text()}`,
+      `Failed to fetch LLM providers - ${await llmProvidersResponse.text()}`,
     ];
   }
-  const defaultLLM = (await defaultLLMResponse.json()) as string;
+
+  const llmProviders = (await llmProvidersResponse.json()) as FullLLMProvider[];
 
   if (personaId && personaResponse && !personaResponse.ok) {
     return [null, `Failed to fetch Persona - ${await personaResponse.text()}`];
   }
+
+  for (const provider of llmProviders) {
+    if (provider.provider == "openai") {
+      provider.icon = OpenAIIcon;
+    } else if (provider.provider == "anthropic") {
+      provider.icon = AnthropicIcon;
+    } else if (provider.provider == "bedrock") {
+      provider.icon = AzureIcon;
+    } else if (provider.provider == "azure") {
+      provider.icon = AWSIcon;
+    } else {
+      provider.icon = OpenSourceIcon;
+    }
+  }
+
   const existingPersona = personaResponse
     ? ((await personaResponse.json()) as Persona)
     : null;
@@ -93,10 +116,10 @@ export async function fetchAssistantEditorInfoSS(
     {
       ccPairs,
       documentSets,
-      llmOverrideOptions,
-      defaultLLM,
+      llmProviders,
       user,
       existingPersona,
+      tools: toolsResponse,
     },
     null,
   ];

@@ -6,9 +6,9 @@ from sqlalchemy.orm import Session
 from danswer.configs.constants import DocumentSource
 from danswer.db.connector import fetch_unique_document_sources
 from danswer.db.engine import get_sqlalchemy_engine
-from danswer.llm.exceptions import GenAIDisabledException
-from danswer.llm.factory import get_default_llm
+from danswer.llm.interfaces import LLM
 from danswer.llm.utils import dict_based_prompt_to_langchain_prompt
+from danswer.llm.utils import message_to_string
 from danswer.prompts.constants import SOURCES_KEY
 from danswer.prompts.filter_extration import FILE_SOURCE_WARNING
 from danswer.prompts.filter_extration import SOURCE_FILTER_PROMPT
@@ -43,7 +43,7 @@ def _sample_document_sources(
 
 
 def extract_source_filter(
-    query: str, db_session: Session
+    query: str, llm: LLM, db_session: Session
 ) -> list[DocumentSource] | None:
     """Returns a list of valid sources for search or None if no specific sources were detected"""
 
@@ -146,27 +146,26 @@ def extract_source_filter(
             logger.warning("LLM failed to provide a valid Source Filter output")
             return None
 
-    try:
-        llm = get_default_llm()
-    except GenAIDisabledException:
-        return None
-
     valid_sources = fetch_unique_document_sources(db_session)
     if not valid_sources:
         return None
 
     messages = _get_source_filter_messages(query=query, valid_sources=valid_sources)
     filled_llm_prompt = dict_based_prompt_to_langchain_prompt(messages)
-    model_output = llm.invoke(filled_llm_prompt)
+    model_output = message_to_string(llm.invoke(filled_llm_prompt))
     logger.debug(model_output)
 
     return _extract_source_filters_from_llm_out(model_output)
 
 
 if __name__ == "__main__":
+    from danswer.llm.factory import get_default_llms, get_main_llm_from_tuple
+
     # Just for testing purposes
     with Session(get_sqlalchemy_engine()) as db_session:
         while True:
             user_input = input("Query to Extract Sources: ")
-            sources = extract_source_filter(user_input, db_session)
+            sources = extract_source_filter(
+                user_input, get_main_llm_from_tuple(get_default_llms()), db_session
+            )
             print(sources)

@@ -10,6 +10,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from sqlalchemy.orm import Session
 
 from danswer.configs.constants import MessageType
+from danswer.configs.danswerbot_configs import DANSWER_BOT_REPHRASE_MESSAGE
 from danswer.configs.danswerbot_configs import DANSWER_BOT_RESPOND_EVERY_CHANNEL
 from danswer.configs.danswerbot_configs import NOTIFY_SLACKBOT_NO_ANSWER
 from danswer.danswerbot.slack.config import get_slack_bot_config_for_channel
@@ -17,6 +18,7 @@ from danswer.danswerbot.slack.constants import DISLIKE_BLOCK_ACTION_ID
 from danswer.danswerbot.slack.constants import FEEDBACK_DOC_BUTTON_BLOCK_ACTION_ID
 from danswer.danswerbot.slack.constants import FOLLOWUP_BUTTON_ACTION_ID
 from danswer.danswerbot.slack.constants import FOLLOWUP_BUTTON_RESOLVED_ACTION_ID
+from danswer.danswerbot.slack.constants import GENERATE_ANSWER_BUTTON_ACTION_ID
 from danswer.danswerbot.slack.constants import IMMEDIATE_RESOLVED_BUTTON_ACTION_ID
 from danswer.danswerbot.slack.constants import LIKE_BLOCK_ACTION_ID
 from danswer.danswerbot.slack.constants import SLACK_CHANNEL_ID
@@ -26,8 +28,15 @@ from danswer.danswerbot.slack.handlers.handle_buttons import handle_followup_but
 from danswer.danswerbot.slack.handlers.handle_buttons import (
     handle_followup_resolved_button,
 )
+from danswer.danswerbot.slack.handlers.handle_buttons import (
+    handle_generate_answer_button,
+)
 from danswer.danswerbot.slack.handlers.handle_buttons import handle_slack_feedback
 from danswer.danswerbot.slack.handlers.handle_message import handle_message
+from danswer.danswerbot.slack.handlers.handle_message import (
+    remove_scheduled_feedback_reminder,
+)
+from danswer.danswerbot.slack.handlers.handle_message import schedule_feedback_reminder
 from danswer.danswerbot.slack.models import SlackMessageInfo
 from danswer.danswerbot.slack.tokens import fetch_tokens
 from danswer.danswerbot.slack.utils import ChannelIdAdapter
@@ -36,19 +45,36 @@ from danswer.danswerbot.slack.utils import get_channel_name_from_id
 from danswer.danswerbot.slack.utils import get_danswer_bot_app_id
 from danswer.danswerbot.slack.utils import read_slack_thread
 from danswer.danswerbot.slack.utils import remove_danswer_bot_tag
+from danswer.danswerbot.slack.utils import rephrase_slack_message
 from danswer.danswerbot.slack.utils import respond_in_thread
 from danswer.db.embedding_model import get_current_db_embedding_model
 from danswer.db.engine import get_sqlalchemy_engine
 from danswer.dynamic_configs.interface import ConfigNotFoundError
+from danswer.natural_language_processing.search_nlp_models import warm_up_encoders
 from danswer.one_shot_answer.models import ThreadMessage
 from danswer.search.retrieval.search_runner import download_nltk_data
-from danswer.search.search_nlp_models import warm_up_encoders
 from danswer.server.manage.models import SlackBotTokens
 from danswer.utils.logger import setup_logger
 from shared_configs.configs import MODEL_SERVER_HOST
 from shared_configs.configs import MODEL_SERVER_PORT
 
 logger = setup_logger()
+
+# In rare cases, some users have been experiencing a massive amount of trivial messages coming through
+# to the Slack Bot with trivial messages. Adding this to avoid exploding LLM costs while we track down
+# the cause.
+_SLACK_GREETINGS_TO_IGNORE = {
+    "Welcome back!",
+    "It's going to be a great day.",
+    "Salutations!",
+    "Greetings!",
+    "Feeling great!",
+    "Hi there",
+    ":wave:",
+}
+
+# this is always (currently) the user id of Slack's official slackbot
+_OFFICIAL_SLACKBOT_USER_ID = "USLACKBOT"
 
 
 def prefilter_requests(req: SocketModeRequest, client: SocketModeClient) -> bool:
@@ -70,6 +96,28 @@ def prefilter_requests(req: SocketModeRequest, client: SocketModeClient) -> bool
 
         if not msg:
             channel_specific_logger.error("Cannot respond to empty message - skipping")
+            return False
+
+        if (
+            req.payload.setdefault("event", {}).get("user", "")
+            == _OFFICIAL_SLACKBOT_USER_ID
+        ):
+            channel_specific_logger.info(
+                "Ignoring messages from Slack's official Slackbot"
+            )
+            return False
+
+        if (
+            msg in _SLACK_GREETINGS_TO_IGNORE
+            or remove_danswer_bot_tag(msg, client=client.web_client)
+            in _SLACK_GREETINGS_TO_IGNORE
+        ):
+            channel_specific_logger.error(
+                f"Ignoring weird Slack greeting message: '{msg}'"
+            )
+            channel_specific_logger.error(
+                f"Weird Slack greeting message payload: '{req.payload}'"
+            )
             return False
 
         # Ensure that the message is a new message of expected type
@@ -153,6 +201,7 @@ def prefilter_requests(req: SocketModeRequest, client: SocketModeClient) -> bool
             )
             return False
 
+    logger.debug(f"Handling Slack request with Payload: '{req.payload}'")
     return True
 
 
@@ -160,6 +209,7 @@ def process_feedback(req: SocketModeRequest, client: SocketModeClient) -> None:
     if actions := req.payload.get("actions"):
         action = cast(dict[str, Any], actions[0])
         feedback_type = cast(str, action.get("action_id"))
+        feedback_msg_reminder = cast(str, action.get("value"))
         feedback_id = cast(str, action.get("block_id"))
         channel_id = cast(str, req.payload["container"]["channel_id"])
         thread_ts = cast(str, req.payload["container"]["thread_ts"])
@@ -172,6 +222,7 @@ def process_feedback(req: SocketModeRequest, client: SocketModeClient) -> None:
     handle_slack_feedback(
         feedback_id=feedback_id,
         feedback_type=feedback_type,
+        feedback_msg_reminder=feedback_msg_reminder,
         client=client.web_client,
         user_id_to_post_confirmation=user_id,
         channel_id_to_post_confirmation=channel_id,
@@ -195,6 +246,14 @@ def build_request_details(
 
         msg = remove_danswer_bot_tag(msg, client=client.web_client)
 
+        if DANSWER_BOT_REPHRASE_MESSAGE:
+            logger.info(f"Rephrasing Slack message. Original message: {msg}")
+            try:
+                msg = rephrase_slack_message(msg)
+                logger.info(f"Rephrased message: {msg}")
+            except Exception as e:
+                logger.error(f"Error while trying to rephrase the Slack message: {e}")
+
         if tagged:
             logger.info("User tagged DanswerBot")
 
@@ -211,6 +270,7 @@ def build_request_details(
             thread_messages=thread_messages,
             channel_to_respond=channel,
             msg_to_respond=cast(str, message_ts or thread_ts),
+            thread_to_respond=cast(str, thread_ts or message_ts),
             sender=event.get("user") or None,
             bypass_filters=tagged,
             is_bot_msg=False,
@@ -228,6 +288,7 @@ def build_request_details(
             thread_messages=[single_msg],
             channel_to_respond=channel,
             msg_to_respond=None,
+            thread_to_respond=None,
             sender=sender,
             bypass_filters=True,
             is_bot_msg=True,
@@ -286,15 +347,32 @@ def process_message(
         ):
             return
 
-        failed = handle_message(
-            message_info=details,
-            channel_config=slack_bot_config,
-            client=client.web_client,
+        follow_up = bool(
+            slack_bot_config
+            and slack_bot_config.channel_config
+            and slack_bot_config.channel_config.get("follow_up_tags") is not None
+        )
+        feedback_reminder_id = schedule_feedback_reminder(
+            details=details, client=client.web_client, include_followup=follow_up
         )
 
-        # Skipping answering due to pre-filtering is not considered a failure
-        if failed and notify_no_answer:
-            apologize_for_fail(details, client)
+        failed = handle_message(
+            message_info=details,
+            slack_bot_config=slack_bot_config,
+            client=client.web_client,
+            feedback_reminder_id=feedback_reminder_id,
+        )
+
+        if failed:
+            if feedback_reminder_id:
+                remove_scheduled_feedback_reminder(
+                    client=client.web_client,
+                    channel=details.sender,
+                    msg_id=feedback_reminder_id,
+                )
+            # Skipping answering due to pre-filtering is not considered a failure
+            if notify_no_answer:
+                apologize_for_fail(details, client)
 
 
 def acknowledge_message(req: SocketModeRequest, client: SocketModeClient) -> None:
@@ -318,6 +396,8 @@ def action_routing(req: SocketModeRequest, client: SocketModeClient) -> None:
             return handle_followup_resolved_button(req, client, immediate=True)
         elif action["action_id"] == FOLLOWUP_BUTTON_RESOLVED_ACTION_ID:
             return handle_followup_resolved_button(req, client, immediate=False)
+        elif action["action_id"] == GENERATE_ANSWER_BUTTON_ACTION_ID:
+            return handle_generate_answer_button(req, client)
 
 
 def view_routing(req: SocketModeRequest, client: SocketModeClient) -> None:
@@ -389,13 +469,13 @@ if __name__ == "__main__":
                     # or the tokens have updated (set up for the first time)
                     with Session(get_sqlalchemy_engine()) as db_session:
                         embedding_model = get_current_db_embedding_model(db_session)
-
-                        warm_up_encoders(
-                            model_name=embedding_model.model_name,
-                            normalize=embedding_model.normalize,
-                            model_server_host=MODEL_SERVER_HOST,
-                            model_server_port=MODEL_SERVER_PORT,
-                        )
+                        if embedding_model.cloud_provider_id is None:
+                            warm_up_encoders(
+                                model_name=embedding_model.model_name,
+                                normalize=embedding_model.normalize,
+                                model_server_host=MODEL_SERVER_HOST,
+                                model_server_port=MODEL_SERVER_PORT,
+                            )
 
                 slack_bot_tokens = latest_slack_bot_tokens
                 # potentially may cause a message to be dropped, but it is complicated

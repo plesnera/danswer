@@ -45,21 +45,54 @@ def extract_jira_project(url: str) -> tuple[str, str]:
     return jira_base, jira_project
 
 
+def extract_text_from_content(content: dict) -> str:
+    texts = []
+    if "content" in content:
+        for block in content["content"]:
+            if "content" in block:
+                for item in block["content"]:
+                    if item["type"] == "text":
+                        texts.append(item["text"])
+    return " ".join(texts)
+
+
+def best_effort_get_field_from_issue(jira_issue: Issue, field: str) -> Any:
+    if hasattr(jira_issue.fields, field):
+        return getattr(jira_issue.fields, field)
+
+    try:
+        return jira_issue.raw["fields"][field]
+    except Exception:
+        return None
+
+
 def _get_comment_strs(
-    jira: Issue,
-    comment_email_blacklist: tuple[str, ...] = (),
+    jira: Issue, comment_email_blacklist: tuple[str, ...] = ()
 ) -> list[str]:
     comment_strs = []
     for comment in jira.fields.comment.comments:
-        # Can't test Jira server so can't be sure this works for everyone, wrapping in a try just
-        # in case
         try:
-            comment_strs.append(comment.body)
-            # If this fails, we just assume it's ok to keep the comment
-            if comment.author.emailAddress in comment_email_blacklist:
-                comment_strs.pop()
-        except Exception:
-            pass
+            if hasattr(comment, "body"):
+                body_text = extract_text_from_content(comment.raw["body"])
+            elif hasattr(comment, "raw"):
+                body = comment.raw.get("body", "No body content available")
+                body_text = (
+                    extract_text_from_content(body) if isinstance(body, dict) else body
+                )
+            else:
+                body_text = "No body attribute found"
+
+            if (
+                hasattr(comment, "author")
+                and comment.author.emailAddress in comment_email_blacklist
+            ):
+                continue  # Skip adding comment if author's email is in blacklist
+
+            comment_strs.append(body_text)
+        except Exception as e:
+            logger.error(f"Failed to process comment due to an error: {e}")
+            continue
+
     return comment_strs
 
 
@@ -94,8 +127,10 @@ def fetch_jira_issues_batch(
             continue
 
         comments = _get_comment_strs(jira, comment_email_blacklist)
-        semantic_rep = f"{jira.fields.description}\n" + "\n".join(
-            [f"Comment: {comment}" for comment in comments]
+        semantic_rep = (
+            f"{jira.fields.description}\n"
+            if jira.fields.description
+            else "" + "\n".join([f"Comment: {comment}" for comment in comments])
         )
 
         page_url = f"{jira_client.client_info()}/browse/{jira.key}"
@@ -124,14 +159,18 @@ def fetch_jira_issues_batch(
             pass
 
         metadata_dict = {}
-        if jira.fields.priority:
-            metadata_dict["priority"] = jira.fields.priority.name
-        if jira.fields.status:
-            metadata_dict["status"] = jira.fields.status.name
-        if jira.fields.resolution:
-            metadata_dict["resolution"] = jira.fields.resolution.name
-        if jira.fields.labels:
-            metadata_dict["label"] = jira.fields.labels
+        priority = best_effort_get_field_from_issue(jira, "priority")
+        if priority:
+            metadata_dict["priority"] = priority.name
+        status = best_effort_get_field_from_issue(jira, "status")
+        if status:
+            metadata_dict["status"] = status.name
+        resolution = best_effort_get_field_from_issue(jira, "resolution")
+        if resolution:
+            metadata_dict["resolution"] = resolution.name
+        labels = best_effort_get_field_from_issue(jira, "labels")
+        if labels:
+            metadata_dict["label"] = labels
 
         doc_batch.append(
             Document(

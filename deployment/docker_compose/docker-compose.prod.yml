@@ -12,17 +12,15 @@ services:
     depends_on:
       - relational_db
       - index
+      - inference_model_server
     restart: always
     env_file:
       - .env
     environment:
-      - AUTH_TYPE=${AUTH_TYPE:-google_oauth}
+      - AUTH_TYPE=${AUTH_TYPE:-oidc}
       - POSTGRES_HOST=relational_db
       - VESPA_HOST=index
       - MODEL_SERVER_HOST=${MODEL_SERVER_HOST:-inference_model_server}
-    volumes:
-      - local_dynamic_storage:/home/storage
-      - file_connector_tmp_storage:/home/file_connector_storage
     extra_hosts:
       - "host.docker.internal:host-gateway"
     logging:
@@ -37,22 +35,21 @@ services:
     build:
       context: ../../backend
       dockerfile: Dockerfile
-    command: /usr/bin/supervisord
+    command: /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
     depends_on:
       - relational_db
       - index
+      - inference_model_server
+      - indexing_model_server
     restart: always
     env_file:
       - .env
     environment:
-      - AUTH_TYPE=${AUTH_TYPE:-google_oauth}
+      - AUTH_TYPE=${AUTH_TYPE:-oidc}
       - POSTGRES_HOST=relational_db
       - VESPA_HOST=index
       - MODEL_SERVER_HOST=${MODEL_SERVER_HOST:-inference_model_server}
       - INDEXING_MODEL_SERVER_HOST=${INDEXING_MODEL_SERVER_HOST:-indexing_model_server}
-    volumes:
-      - local_dynamic_storage:/home/storage
-      - file_connector_tmp_storage:/home/file_connector_storage
     extra_hosts:
       - "host.docker.internal:host-gateway"
     logging:
@@ -60,7 +57,6 @@ services:
       options:
         max-size: "50m"
         max-file: "6"
-
 
   web_server:
     image: danswer/danswer-web-server:latest
@@ -70,6 +66,10 @@ services:
       args:
         - NEXT_PUBLIC_DISABLE_STREAMING=${NEXT_PUBLIC_DISABLE_STREAMING:-false}
         - NEXT_PUBLIC_NEW_CHAT_DIRECTS_TO_SAME_PERSONA=${NEXT_PUBLIC_NEW_CHAT_DIRECTS_TO_SAME_PERSONA:-false}
+        - NEXT_PUBLIC_POSITIVE_PREDEFINED_FEEDBACK_OPTIONS=${NEXT_PUBLIC_POSITIVE_PREDEFINED_FEEDBACK_OPTIONS:-}
+        - NEXT_PUBLIC_NEGATIVE_PREDEFINED_FEEDBACK_OPTIONS=${NEXT_PUBLIC_NEGATIVE_PREDEFINED_FEEDBACK_OPTIONS:-}
+        - NEXT_PUBLIC_DISABLE_LOGOUT=${NEXT_PUBLIC_DISABLE_LOGOUT:-}
+        - NEXT_PUBLIC_THEME=${NEXT_PUBLIC_THEME:-}
     depends_on:
       - api_server
     restart: always
@@ -82,6 +82,8 @@ services:
       options:
         max-size: "50m"
         max-file: "6"
+
+
   relational_db:
     image: postgres:15.2-alpine
     restart: always
@@ -115,6 +117,7 @@ services:
       # Set to debug to get more fine-grained logs
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
+      # Not necessary, this is just to reduce download time during startup
       - model_cache_huggingface:/root/.cache/huggingface/
     logging:
       driver: json-file
@@ -142,7 +145,8 @@ services:
       # Set to debug to get more fine-grained logs
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
-      - model_cache_huggingface:/root/.cache/huggingface/
+      # Not necessary, this is just to reduce download time during startup
+      - indexing_huggingface_model_cache:/root/.cache/huggingface/
     logging:
       driver: json-file
       options:
@@ -189,7 +193,7 @@ services:
       options:
         max-size: "50m"
         max-file: "6"
-    # the specified script waits for the api_server to start up. 
+    # The specified script waits for the api_server to start up. 
     # Without this we've seen issues where nginx shows no error logs but 
     # does not recieve any traffic  
     # NOTE: we have to use dos2unix to remove Carriage Return chars from the file
@@ -217,12 +221,8 @@ services:
 
 
 volumes:
-  # local_dynamic_storage is legacy only now
-  local_dynamic_storage:
-  # used to store files uploaded by the user temporarily while we are indexing them
-  # file_connector_tmp_storage is legacy only now
-  file_connector_tmp_storage:
   db_volume:
   vespa_volume:
   # Created by the container itself
   model_cache_huggingface:
+  indexing_huggingface_model_cache:

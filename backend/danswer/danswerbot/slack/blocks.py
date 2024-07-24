@@ -25,6 +25,7 @@ from danswer.danswerbot.slack.constants import DISLIKE_BLOCK_ACTION_ID
 from danswer.danswerbot.slack.constants import FEEDBACK_DOC_BUTTON_BLOCK_ACTION_ID
 from danswer.danswerbot.slack.constants import FOLLOWUP_BUTTON_ACTION_ID
 from danswer.danswerbot.slack.constants import FOLLOWUP_BUTTON_RESOLVED_ACTION_ID
+from danswer.danswerbot.slack.constants import GENERATE_ANSWER_BUTTON_ACTION_ID
 from danswer.danswerbot.slack.constants import IMMEDIATE_RESOLVED_BUTTON_ACTION_ID
 from danswer.danswerbot.slack.constants import LIKE_BLOCK_ACTION_ID
 from danswer.danswerbot.slack.icons import source_to_github_img_link
@@ -36,6 +37,20 @@ from danswer.utils.text_processing import decode_escapes
 from danswer.utils.text_processing import replace_whitespaces_w_space
 
 _MAX_BLURB_LEN = 45
+
+
+def get_feedback_reminder_blocks(thread_link: str, include_followup: bool) -> Block:
+    text = (
+        f"Please provide feedback on <{thread_link}|this answer>. "
+        "This is essential to help us to improve the quality of the answers. "
+        "Please rate it by clicking the `Helpful` or `Not helpful` button. "
+    )
+    if include_followup:
+        text += "\n\nIf you need more help, click the `I need more help from a human!` button. "
+
+    text += "\n\nThanks!"
+
+    return SectionBlock(text=text)
 
 
 def _process_citations_for_slack(text: str) -> str:
@@ -61,12 +76,36 @@ def _process_citations_for_slack(text: str) -> str:
     return re.sub(pattern, slack_link_format, text)
 
 
+def _split_text(text: str, limit: int = 3000) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+
+        # Find the nearest space before the limit to avoid splitting a word
+        split_at = text.rfind(" ", 0, limit)
+        if split_at == -1:  # No spaces found, force split
+            split_at = limit
+
+        chunk = text[:split_at]
+        chunks.append(chunk)
+        text = text[split_at:].lstrip()  # Remove leading spaces from the next chunk
+
+    return chunks
+
+
 def clean_markdown_link_text(text: str) -> str:
     # Remove any newlines within the text
     return text.replace("\n", " ").strip()
 
 
-def build_qa_feedback_block(message_id: int) -> Block:
+def build_qa_feedback_block(
+    message_id: int, feedback_reminder_id: str | None = None
+) -> Block:
     return ActionsBlock(
         block_id=build_feedback_id(message_id),
         elements=[
@@ -74,10 +113,12 @@ def build_qa_feedback_block(message_id: int) -> Block:
                 action_id=LIKE_BLOCK_ACTION_ID,
                 text="👍 Helpful",
                 style="primary",
+                value=feedback_reminder_id,
             ),
             ButtonElement(
                 action_id=DISLIKE_BLOCK_ACTION_ID,
                 text="👎 Not helpful",
+                value=feedback_reminder_id,
             ),
         ],
     )
@@ -313,6 +354,22 @@ def build_quotes_block(
     return [SectionBlock(text="*Relevant Snippets*\n" + "\n".join(quote_lines))]
 
 
+def build_standard_answer_blocks(
+    answer_message: str,
+) -> list[Block]:
+    generate_button_block = ButtonElement(
+        action_id=GENERATE_ANSWER_BUTTON_ACTION_ID,
+        text="Generate Full Answer",
+    )
+    answer_block = SectionBlock(text=answer_message)
+    return [
+        answer_block,
+        ActionsBlock(
+            elements=[generate_button_block],
+        ),
+    ]
+
+
 def build_qa_response_blocks(
     message_id: int | None,
     answer: str | None,
@@ -323,6 +380,7 @@ def build_qa_response_blocks(
     skip_quotes: bool = False,
     process_message_for_citations: bool = False,
     skip_ai_feedback: bool = False,
+    feedback_reminder_id: str | None = None,
 ) -> list[Block]:
     if DISABLE_GENERATIVE_AI:
         return []
@@ -348,14 +406,18 @@ def build_qa_response_blocks(
         filter_block = SectionBlock(text=f"_{filter_text}_")
 
     if not answer:
-        answer_block = SectionBlock(
-            text="Sorry, I was unable to find an answer, but I did find some potentially relevant docs 🤓"
-        )
+        answer_blocks = [
+            SectionBlock(
+                text="Sorry, I was unable to find an answer, but I did find some potentially relevant docs 🤓"
+            )
+        ]
     else:
         answer_processed = decode_escapes(remove_slack_text_interactions(answer))
         if process_message_for_citations:
             answer_processed = _process_citations_for_slack(answer_processed)
-        answer_block = SectionBlock(text=answer_processed)
+        answer_blocks = [
+            SectionBlock(text=text) for text in _split_text(answer_processed)
+        ]
         if quotes:
             quotes_blocks = build_quotes_block(quotes)
 
@@ -372,10 +434,14 @@ def build_qa_response_blocks(
     if filter_block is not None:
         response_blocks.append(filter_block)
 
-    response_blocks.append(answer_block)
+    response_blocks.extend(answer_blocks)
 
     if message_id is not None and not skip_ai_feedback:
-        response_blocks.append(build_qa_feedback_block(message_id=message_id))
+        response_blocks.append(
+            build_qa_feedback_block(
+                message_id=message_id, feedback_reminder_id=feedback_reminder_id
+            )
+        )
 
     if not skip_quotes:
         response_blocks.extend(quotes_blocks)
@@ -408,7 +474,7 @@ def build_follow_up_resolved_blocks(
     if tag_str:
         tag_str += " "
 
-    group_str = " ".join([f"<!subteam^{group}>" for group in group_ids])
+    group_str = " ".join([f"<!subteam^{group_id}|>" for group_id in group_ids])
     if group_str:
         group_str += " "
 

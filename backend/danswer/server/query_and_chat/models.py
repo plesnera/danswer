@@ -9,6 +9,7 @@ from danswer.configs.constants import DocumentSource
 from danswer.configs.constants import MessageType
 from danswer.configs.constants import SearchFeedbackType
 from danswer.db.enums import ChatSessionSharedStatus
+from danswer.file_store.models import FileDescriptor
 from danswer.llm.override_models import LLMOverride
 from danswer.llm.override_models import PromptOverride
 from danswer.search.models import BaseFilters
@@ -16,6 +17,7 @@ from danswer.search.models import ChunkContext
 from danswer.search.models import RetrievalDetails
 from danswer.search.models import SearchDoc
 from danswer.search.models import Tag
+from danswer.tools.models import ToolCallFinalResult
 
 
 class SourceTag(Tag):
@@ -28,6 +30,12 @@ class TagResponse(BaseModel):
 
 class SimpleQueryRequest(BaseModel):
     query: str
+
+
+class UpdateChatSessionThreadRequest(BaseModel):
+    # If not specified, use Danswer default persona
+    chat_session_id: int
+    new_alternate_model: str
 
 
 class ChatSessionCreationRequest(BaseModel):
@@ -49,6 +57,7 @@ class ChatFeedbackRequest(BaseModel):
     chat_message_id: int
     is_positive: bool | None = None
     feedback_text: str | None = None
+    predefined_feedback: str | None = None
 
     @root_validator
     def check_is_positive_or_feedback_text(cls: BaseModel, values: dict) -> dict:
@@ -81,6 +90,8 @@ class CreateChatMessageRequest(ChunkContext):
     parent_message_id: int | None
     # New message contents
     message: str
+    # Files that we should attach to this message
+    file_descriptors: list[FileDescriptor]
     # If no prompt provided, uses the largest prompt of the chat session
     # but really this should be explicitly specified, only in the simplified APIs is this inferred
     # Use prompt_id 0 to use the system default prompt which is Answer-Question
@@ -91,11 +102,13 @@ class CreateChatMessageRequest(ChunkContext):
     # allows the caller to specify the exact search query they want to use
     # will disable Query Rewording if specified
     query_override: str | None = None
-    no_ai_answer: bool = False
 
     # allows the caller to override the Persona / Prompt
     llm_override: LLMOverride | None = None
     prompt_override: PromptOverride | None = None
+
+    # allow user to specify an alternate assistnat
+    alternate_assistant_id: int | None = None
 
     # used for seeded chats to kick off the generation of an AI answer
     use_existing_user_message: bool = False
@@ -137,6 +150,8 @@ class ChatSessionDetails(BaseModel):
     persona_id: int
     time_created: str
     shared_status: ChatSessionSharedStatus
+    folder_id: int | None
+    current_alternate_model: str | None = None
 
 
 class ChatSessionsResponse(BaseModel):
@@ -156,7 +171,6 @@ class SearchFeedbackRequest(BaseModel):
 
         if click is False and feedback is None:
             raise ValueError("Empty feedback received.")
-
         return values
 
 
@@ -169,13 +183,24 @@ class ChatMessageDetail(BaseModel):
     context_docs: RetrievalDocs | None
     message_type: MessageType
     time_sent: datetime
+    alternate_assistant_id: str | None
     # Dict mapping citation number to db_doc_id
+    chat_session_id: int | None = None
     citations: dict[int, int] | None
+    files: list[FileDescriptor]
+    tool_calls: list[ToolCallFinalResult]
 
     def dict(self, *args: list, **kwargs: dict[str, Any]) -> dict[str, Any]:  # type: ignore
         initial_dict = super().dict(*args, **kwargs)  # type: ignore
         initial_dict["time_sent"] = self.time_sent.isoformat()
         return initial_dict
+
+
+class SearchSessionDetailResponse(BaseModel):
+    search_session_id: int
+    description: str
+    documents: list[SearchDoc]
+    messages: list[ChatMessageDetail]
 
 
 class ChatSessionDetailResponse(BaseModel):
@@ -186,6 +211,7 @@ class ChatSessionDetailResponse(BaseModel):
     messages: list[ChatMessageDetail]
     time_created: datetime
     shared_status: ChatSessionSharedStatus
+    current_alternate_model: str | None
 
 
 class QueryValidationResponse(BaseModel):

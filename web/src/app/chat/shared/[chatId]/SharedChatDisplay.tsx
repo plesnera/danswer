@@ -2,10 +2,15 @@
 
 import { humanReadableFormat } from "@/lib/time";
 import { BackendChatSession } from "../../interfaces";
-import { getCitedDocumentsFromMessage, processRawChatHistory } from "../../lib";
+import {
+  buildLatestMessageChain,
+  getCitedDocumentsFromMessage,
+  processRawChatHistory,
+} from "../../lib";
 import { AIMessage, HumanMessage } from "../../message/Messages";
 import { Button, Callout, Divider } from "@tremor/react";
 import { useRouter } from "next/navigation";
+import { Persona } from "@/app/admin/assistants/interfaces";
 
 function BackToDanswerButton() {
   const router = useRouter();
@@ -23,8 +28,10 @@ function BackToDanswerButton() {
 
 export function SharedChatDisplay({
   chatSession,
+  availableAssistants,
 }: {
   chatSession: BackendChatSession | null;
+  availableAssistants: Persona[];
 }) {
   if (!chatSession) {
     return (
@@ -40,7 +47,13 @@ export function SharedChatDisplay({
     );
   }
 
-  const messages = processRawChatHistory(chatSession.messages);
+  const currentPersona = availableAssistants.find(
+    (persona) => persona.id === chatSession.persona_id
+  );
+
+  const messages = buildLatestMessageChain(
+    processRawChatHistory(chatSession.messages)
+  );
 
   return (
     <div className="w-full overflow-hidden">
@@ -71,6 +84,7 @@ export function SharedChatDisplay({
                 } else {
                   return (
                     <AIMessage
+                      currentPersona={currentPersona!}
                       key={message.messageId}
                       messageId={message.messageId}
                       content={message.message}

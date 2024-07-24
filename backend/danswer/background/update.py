@@ -17,8 +17,6 @@ from danswer.configs.app_configs import DASK_JOB_CLIENT_ENABLED
 from danswer.configs.app_configs import DISABLE_INDEX_UPDATE_ON_SWAP
 from danswer.configs.app_configs import NUM_INDEXING_WORKERS
 from danswer.db.connector import fetch_connectors
-from danswer.db.connector_credential_pair import mark_all_in_progress_cc_pairs_failed
-from danswer.db.connector_credential_pair import update_connector_credential_pair
 from danswer.db.embedding_model import get_current_db_embedding_model
 from danswer.db.embedding_model import get_secondary_db_embedding_model
 from danswer.db.engine import get_db_current_time
@@ -35,8 +33,10 @@ from danswer.db.models import IndexAttempt
 from danswer.db.models import IndexingStatus
 from danswer.db.models import IndexModelStatus
 from danswer.db.swap_index import check_index_swap
-from danswer.search.search_nlp_models import warm_up_encoders
+from danswer.natural_language_processing.search_nlp_models import warm_up_encoders
 from danswer.utils.logger import setup_logger
+from danswer.utils.variable_functionality import global_version
+from danswer.utils.variable_functionality import set_is_ee_based_on_env_variable
 from shared_configs.configs import INDEXING_MODEL_SERVER_HOST
 from shared_configs.configs import LOG_LEVEL
 from shared_configs.configs import MODEL_SERVER_PORT
@@ -119,17 +119,6 @@ def _mark_run_failed(
         db_session=db_session,
         failure_reason=failure_reason,
     )
-    if (
-        index_attempt.connector_id is not None
-        and index_attempt.credential_id is not None
-        and index_attempt.embedding_model.status == IndexModelStatus.PRESENT
-    ):
-        update_connector_credential_pair(
-            db_session=db_session,
-            connector_id=index_attempt.connector_id,
-            credential_id=index_attempt.credential_id,
-            attempt_status=IndexingStatus.FAILED,
-        )
 
 
 """Main funcs"""
@@ -191,16 +180,6 @@ def create_indexing_jobs(existing_jobs: dict[int, Future | SimpleJob]) -> None:
                     create_index_attempt(
                         connector.id, credential.id, model.id, db_session
                     )
-
-                    # CC-Pair will have the status that it should for the primary index
-                    # Will be re-sync-ed once the indices are swapped
-                    if model.status == IndexModelStatus.PRESENT:
-                        update_connector_credential_pair(
-                            db_session=db_session,
-                            connector_id=connector.id,
-                            credential_id=credential.id,
-                            attempt_status=IndexingStatus.NOT_STARTED,
-                        )
 
 
 def cleanup_indexing_jobs(
@@ -330,10 +309,18 @@ def kickoff_indexing_jobs(
 
         if use_secondary_index:
             run = secondary_client.submit(
-                run_indexing_entrypoint, attempt.id, pure=False
+                run_indexing_entrypoint,
+                attempt.id,
+                global_version.get_is_ee_version(),
+                pure=False,
             )
         else:
-            run = client.submit(run_indexing_entrypoint, attempt.id, pure=False)
+            run = client.submit(
+                run_indexing_entrypoint,
+                attempt.id,
+                global_version.get_is_ee_version(),
+                pure=False,
+            )
 
         if run:
             secondary_str = "(secondary index) " if use_secondary_index else ""
@@ -356,13 +343,15 @@ def update_loop(delay: int = 10, num_workers: int = NUM_INDEXING_WORKERS) -> Non
 
     # So that the first time users aren't surprised by really slow speed of first
     # batch of documents indexed
-    logger.info("Running a first inference to warm up embedding model")
-    warm_up_encoders(
-        model_name=db_embedding_model.model_name,
-        normalize=db_embedding_model.normalize,
-        model_server_host=INDEXING_MODEL_SERVER_HOST,
-        model_server_port=MODEL_SERVER_PORT,
-    )
+
+    if db_embedding_model.cloud_provider_id is None:
+        logger.info("Running a first inference to warm up embedding model")
+        warm_up_encoders(
+            model_name=db_embedding_model.model_name,
+            normalize=db_embedding_model.normalize,
+            model_server_host=INDEXING_MODEL_SERVER_HOST,
+            model_server_port=MODEL_SERVER_PORT,
+        )
 
     client_primary: Client | SimpleJobClient
     client_secondary: Client | SimpleJobClient
@@ -390,11 +379,6 @@ def update_loop(delay: int = 10, num_workers: int = NUM_INDEXING_WORKERS) -> Non
         client_secondary = SimpleJobClient(n_workers=num_workers)
 
     existing_jobs: dict[int, Future | SimpleJob] = {}
-
-    with Session(engine) as db_session:
-        # Previous version did not always clean up cc-pairs well leaving some connectors undeleteable
-        # This ensures that bad states get cleaned up
-        mark_all_in_progress_cc_pairs_failed(db_session)
 
     while True:
         start = time.time()
@@ -426,6 +410,8 @@ def update_loop(delay: int = 10, num_workers: int = NUM_INDEXING_WORKERS) -> Non
 
 
 def update__main() -> None:
+    set_is_ee_based_on_env_variable()
+
     logger.info("Starting Indexing Loop")
     update_loop()
 
